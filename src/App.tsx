@@ -1,4 +1,17 @@
 import { FormEvent, PointerEvent as ReactPointerEvent, ReactNode, useEffect, useRef, useState } from "react";
+
+// One-time wipe of the practice data entered while checking the site.
+const freshStart = "courtside.fresh-start";
+if (localStorage.getItem(freshStart) !== "2") {
+  localStorage.setItem(freshStart, "2");
+  window.setTimeout(() => {
+    for (const key of Object.keys(localStorage)) {
+      if (key.startsWith("courtside.") && key !== freshStart) localStorage.removeItem(key);
+    }
+    sessionStorage.removeItem("courtside.session");
+    location.reload();
+  }, 50);
+}
 import {
   ArrowLeft,
   BarChart3,
@@ -13,11 +26,12 @@ import {
   LayoutDashboard,
   LogOut,
   Menu,
-  MoreHorizontal,
   NotebookTabs,
+  Palette,
   Pencil,
   Play,
   Plus,
+  Printer,
   Settings,
   Trash2,
   ShieldCheck,
@@ -31,14 +45,28 @@ import {
   X,
 } from "lucide-react";
 
-type Page = "Overview" | "Schedule" | "Playbook" | "Roster" | "Scouting";
+type Page = "Overview" | "Schedule" | "Results" | "Playbook" | "Roster" | "Scouting";
 
 const navigation: { label: Page; icon: typeof LayoutDashboard }[] = [
   { label: "Overview", icon: LayoutDashboard },
   { label: "Schedule", icon: CalendarDays },
+  { label: "Results", icon: Trophy },
   { label: "Playbook", icon: NotebookTabs },
   { label: "Roster", icon: Users },
   { label: "Scouting", icon: Target },
+];
+
+type Theme = { id: string; name: string; accent: string; dark: string };
+
+const themes: Theme[] = [
+  { id: "lime", name: "Court Lime", accent: "#d9ff57", dark: "#101611" },
+  { id: "royal", name: "Royal Blue", accent: "#7cc4ff", dark: "#0d1524" },
+  { id: "crimson", name: "Crimson", accent: "#ff6b6b", dark: "#1a0f11" },
+  { id: "gold", name: "Gold", accent: "#ffc94a", dark: "#17130b" },
+  { id: "purple", name: "Purple", accent: "#c3a1ff", dark: "#140f1f" },
+  { id: "teal", name: "Teal", accent: "#4fe3c1", dark: "#0a1916" },
+  { id: "orange", name: "Orange", accent: "#ff9f43", dark: "#1a120a" },
+  { id: "silver", name: "Silver", accent: "#e3e7ee", dark: "#121417" },
 ];
 
 type EventType = "Game" | "Practice" | "Film" | "Meeting";
@@ -105,6 +133,20 @@ type Player = {
   accountEmail?: string;
 };
 
+type ScoutPlayer = { number: string; name: string; note: string };
+
+type ScoutReport = {
+  id: string;
+  opponent: string;
+  record: string;
+  offense: string;
+  defense: string;
+  keyPlayers: ScoutPlayer[];
+  keys: string[];
+  notes: string;
+  updated: string;
+};
+
 type Dialog =
   | null
   | { type: "event-form"; draft?: ScheduleEvent }
@@ -116,6 +158,7 @@ type Dialog =
   | { type: "reviews" }
   | { type: "report-form"; id: string }
   | { type: "report"; id: string }
+  | { type: "scout-form"; draft?: ScoutReport; opponent?: string }
   | { type: "settings" };
 
 const playFilters = ["All plays", "Offense", "Defense", "Out of bounds", "Press break"] as const;
@@ -183,7 +226,7 @@ function loadSession(): CoachSession | null {
   return null;
 }
 
-function dataKey(session: WorkspaceSession, kind: "events" | "plays" | "players") {
+function dataKey(session: WorkspaceSession, kind: "events" | "plays" | "players" | "scouting") {
   if (session.kind === "demo") return `courtside.${kind}`;
   return `courtside.${encodeURIComponent(session.email)}.${kind}`;
 }
@@ -222,12 +265,12 @@ function teamCodeFor(session: WorkspaceSession) {
 function teamByCode(code: string) {
   const normalized = code.trim().toUpperCase();
   if (normalized === demoTeamCode) {
-    return { name: demoProfile.teamName, coach: demoProfile.name, level: demoProfile.level, eventsKey: "courtside.events", playersKey: "courtside.players" };
+    return { code: demoTeamCode, name: demoProfile.teamName, coach: demoProfile.name, level: demoProfile.level, eventsKey: "courtside.events", playersKey: "courtside.players" };
   }
   const account = loadAccounts().find((item) => item.teamCode === normalized);
   if (!account) return null;
   const prefix = `courtside.${encodeURIComponent(account.email)}`;
-  return { name: account.teamName, coach: account.name, level: account.level, eventsKey: `${prefix}.events`, playersKey: `${prefix}.players` };
+  return { code: normalized, name: account.teamName, coach: account.name, level: account.level, eventsKey: `${prefix}.events`, playersKey: `${prefix}.players` };
 }
 
 function mergeRoster(teamCode: string, existing: Player[]) {
@@ -304,8 +347,87 @@ function whenProblem(date: string, time: string) {
   return "";
 }
 
+function hasStarted(event: ScheduleEvent) {
+  const today = todayISO();
+  return event.date < today || (event.date === today && event.time <= nowTime());
+}
+
 function canReport(event: ScheduleEvent) {
-  return event.type === "Game" && event.date <= todayISO();
+  return event.type === "Game" && hasStarted(event);
+}
+
+function isResult(event: ScheduleEvent) {
+  return event.type === "Game" && (hasStarted(event) || Boolean(event.report));
+}
+
+function isUpcoming(event: ScheduleEvent) {
+  return !hasStarted(event) && !event.report;
+}
+
+function seasonRecord(events: ScheduleEvent[]) {
+  const reports = events.flatMap((event) => event.report ? [event.report] : []);
+  const wins = reports.filter((report) => resultOf(report) === "W").length;
+  const losses = reports.filter((report) => resultOf(report) === "L").length;
+  const ties = reports.length - wins - losses;
+  const scored = reports.reduce((total, report) => total + report.teamScore, 0);
+  const allowed = reports.reduce((total, report) => total + report.opponentScore, 0);
+  return {
+    games: reports.length,
+    wins,
+    losses,
+    ties,
+    label: `${wins}–${losses}${ties ? `–${ties}` : ""}`,
+    ppg: reports.length ? (scored / reports.length).toFixed(1) : "—",
+    oppg: reports.length ? (allowed / reports.length).toFixed(1) : "—",
+    margin: reports.length ? ((scored - allowed) / reports.length).toFixed(1) : "—",
+  };
+}
+
+function hexToRgb(hex: string) {
+  const value = hex.replace("#", "");
+  const full = value.length === 3 ? value.split("").map((c) => c + c).join("") : value;
+  const number = parseInt(full, 16);
+  return [(number >> 16) & 255, (number >> 8) & 255, number & 255];
+}
+
+function mixHex(a: string, b: string, amount: number) {
+  const [r1, g1, b1] = hexToRgb(a);
+  const [r2, g2, b2] = hexToRgb(b);
+  const mix = (x: number, y: number) => Math.round(x + (y - x) * amount).toString(16).padStart(2, "0");
+  return `#${mix(r1, r2)}${mix(g1, g2)}${mix(b1, b2)}`;
+}
+
+function inkFor(hex: string) {
+  const [r, g, b] = hexToRgb(hex).map((value) => {
+    const channel = value / 255;
+    return channel <= 0.03928 ? channel / 12.92 : ((channel + 0.055) / 1.055) ** 2.4;
+  });
+  return 0.2126 * r + 0.7152 * g + 0.0722 * b > 0.4 ? "#111611" : "#ffffff";
+}
+
+function themeKey(code: string) {
+  return `courtside.theme.${code}`;
+}
+
+function loadTheme(code: string): Theme {
+  try {
+    const saved = JSON.parse(localStorage.getItem(themeKey(code)) ?? "null") as Theme | null;
+    if (saved && /^#[0-9a-f]{6}$/i.test(saved.accent) && /^#[0-9a-f]{6}$/i.test(saved.dark)) return saved;
+  } catch {
+    return themes[0];
+  }
+  return themes[0];
+}
+
+function customTheme(accent: string): Theme {
+  return { id: "custom", name: "Custom", accent, dark: mixHex("#0c0e0c", accent, 0.1) };
+}
+
+function applyTheme(theme: Theme) {
+  const root = document.documentElement.style;
+  root.setProperty("--accent", theme.accent);
+  root.setProperty("--accent-ink", inkFor(theme.accent));
+  root.setProperty("--dark", theme.dark);
 }
 
 function opponentName(title: string) {
@@ -343,13 +465,63 @@ function latestReported(events: ScheduleEvent[]) {
 }
 
 function bySchedule(a: ScheduleEvent, b: ScheduleEvent) {
-  const today = todayISO();
-  const aPast = a.date < today;
-  const bPast = b.date < today;
-  if (aPast !== bPast) return aPast ? 1 : -1;
-  const aKey = `${a.date}T${a.time}`;
-  const bKey = `${b.date}T${b.time}`;
-  return aPast ? bKey.localeCompare(aKey) : aKey.localeCompare(bKey);
+  return `${a.date}T${a.time}`.localeCompare(`${b.date}T${b.time}`);
+}
+
+function byRecent(a: ScheduleEvent, b: ScheduleEvent) {
+  return `${b.date}T${b.time}`.localeCompare(`${a.date}T${a.time}`);
+}
+
+function digits(value: string, max: number) {
+  return value.replace(/\D/g, "").slice(0, max);
+}
+
+function daysUntil(date: string) {
+  const [year, month, day] = date.split("-").map(Number);
+  const target = new Date(year, month - 1, day).getTime();
+  const now = new Date();
+  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+  return Math.round((target - today) / 86_400_000);
+}
+
+function greeting() {
+  const hour = new Date().getHours();
+  if (hour < 12) return "Good morning";
+  if (hour < 17) return "Good afternoon";
+  return "Good evening";
+}
+
+type Task = { id: string; title: string; detail: string; go: () => void };
+
+function buildTasks(
+  events: ScheduleEvent[],
+  players: Player[],
+  scouting: ScoutReport[],
+  open: { result: (id: string) => void; event: (id: string) => void; roster: () => void; scout: (opponent: string) => void },
+) {
+  const tasks: Task[] = [];
+  for (const event of events.filter((item) => canReport(item) && !item.report).sort(byRecent)) {
+    tasks.push({ id: `r-${event.id}`, title: `Enter the result for ${event.title}`, detail: `${formatDate(event.date).label} · score and box score`, go: () => open.result(event.id) });
+  }
+  const soon = events.filter((item) => isUpcoming(item) && daysUntil(item.date) <= 7).sort(bySchedule);
+  for (const event of soon.filter((item) => item.type === "Game" && (item.lineup ?? []).length === 0)) {
+    tasks.push({ id: `l-${event.id}`, title: `Pick the lineup for ${event.title}`, detail: `${formatDate(event.date).label} · ${players.length} on the roster`, go: () => open.event(event.id) });
+  }
+  for (const event of soon.filter((item) => item.type === "Game" && !scouting.some((report) => sameOpponent(report.opponent, item.title)))) {
+    tasks.push({ id: `s-${event.id}`, title: `Scout ${opponentName(event.title)}`, detail: `Before ${formatDate(event.date).label}`, go: () => open.scout(opponentName(event.title)) });
+  }
+  for (const event of soon.filter((item) => !item.notes)) {
+    tasks.push({ id: `n-${event.id}`, title: `Add notes for ${event.title}`, detail: "Players see these before they arrive", go: () => open.event(event.id) });
+  }
+  const unreviewed = players.filter((player) => !player.review).length;
+  if (unreviewed > 0) {
+    tasks.push({ id: "reviews", title: `Write ${unreviewed} player review${unreviewed === 1 ? "" : "s"}`, detail: "Feedback shows on each player’s home", go: open.roster });
+  }
+  return tasks;
+}
+
+function sameOpponent(a: string, b: string) {
+  return opponentName(a).toLowerCase() === opponentName(b).toLowerCase();
 }
 
 type VideoEmbed = { src: string; thumb: string | null; kind: "youtube" | "vimeo" | "file" };
@@ -432,7 +604,9 @@ function Sidebar({
   onSignOut,
   onSettings,
   rosterCount,
+  resultsDue,
   profile,
+  events,
 }: {
   page: Page;
   setPage: (page: Page) => void;
@@ -441,8 +615,14 @@ function Sidebar({
   onSignOut: () => void;
   onSettings: () => void;
   rosterCount: number;
+  resultsDue: number;
   profile: CoachProfile;
+  events: ScheduleEvent[];
 }) {
+  const record = seasonRecord(events);
+  const remaining = events.filter((event) => event.type === "Game" && isUpcoming(event)).length;
+  const total = record.games + remaining;
+
   return (
     <>
       <aside className={`sidebar ${open ? "is-open" : ""}`}>
@@ -453,14 +633,14 @@ function Sidebar({
           </button>
         </div>
 
-        <div className="team-switcher">
+        <button className="team-switcher" onClick={onSettings} aria-label="Team settings">
           <div className="team-badge">{initials(profile.teamName)}</div>
           <div>
             <strong>{profile.teamName}</strong>
             <span>{profile.level} · {profile.season}</span>
           </div>
-          <MoreHorizontal size={18} />
-        </div>
+          <Palette size={16} />
+        </button>
 
         <nav>
           <p className="eyebrow nav-label">Workspace</p>
@@ -476,38 +656,28 @@ function Sidebar({
               <Icon size={19} strokeWidth={1.8} />
               <span>{label}</span>
               {label === "Roster" && <small>{rosterCount}</small>}
+              {label === "Results" && resultsDue > 0 && <small className="is-due">{resultsDue}</small>}
             </button>
           ))}
         </nav>
 
         <div className="sidebar-spacer" />
-        <div className="season-card">
-          <div className="season-icon"><Trophy size={19} /></div>
-          {profile.demo ? (
-            <>
-              <div>
-                <span>Season progress</span>
-                <strong>12–4</strong>
-              </div>
-              <div className="progress"><span style={{ width: "72%" }} /></div>
-              <small>8 games remaining</small>
-            </>
-          ) : (
-            <>
-              <div>
-                <span>{profile.season} season</span>
-                <strong>{profile.level}</strong>
-              </div>
-              <small>{rosterCount} player{rosterCount === 1 ? "" : "s"} on the roster</small>
-            </>
-          )}
-        </div>
+        <button className="season-card" onClick={() => { setPage("Results"); setOpen(false); }}>
+          <div className="season-head">
+            <div className="season-icon"><Trophy size={17} /></div>
+            <div>
+              <span>{profile.season} season</span>
+              <strong>{record.games === 0 ? "No results yet" : record.label}</strong>
+            </div>
+          </div>
+          <div className="progress"><span style={{ width: `${total ? Math.round((record.games / total) * 100) : 0}%` }} /></div>
+          <small>{remaining === 0 ? "No games left on the schedule" : `${remaining} game${remaining === 1 ? "" : "s"} remaining`}</small>
+        </button>
         <button className="nav-item" onClick={onSettings}><Settings size={19} /><span>Settings</span></button>
         <button className="nav-item" onClick={onSignOut}><LogOut size={19} /><span>Sign out</span></button>
         <div className="coach-profile">
           <div className="avatar">{initials(profile.name)}</div>
-          <div><strong>{profile.name}</strong><span>Head Coach</span></div>
-          <MoreHorizontal size={17} />
+          <div><strong>{profile.name}</strong><span>Head coach</span></div>
         </div>
       </aside>
       {open && <button className="backdrop" onClick={() => setOpen(false)} aria-label="Close menu" />}
@@ -519,29 +689,53 @@ function Header({
   page,
   onMenu,
   profile,
+  tasks,
 }: {
   page: Page;
   onMenu: () => void;
   profile: CoachProfile;
+  tasks: Task[];
 }) {
   const [noticesOpen, setNoticesOpen] = useState(false);
+  const wrapRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!noticesOpen) return;
+    function close(event: MouseEvent) {
+      if (!wrapRef.current?.contains(event.target as Node)) setNoticesOpen(false);
+    }
+    document.addEventListener("mousedown", close);
+    return () => document.removeEventListener("mousedown", close);
+  }, [noticesOpen]);
 
   return (
     <header className="topbar">
       <button className="icon-button menu-button" onClick={onMenu} aria-label="Open menu"><Menu size={20} /></button>
       <div>
-        <p className="eyebrow">{profile.teamName} / {profile.level}</p>
+        <p className="eyebrow">{profile.teamName} · {profile.level}</p>
         <h1>{page}</h1>
       </div>
       <div className="topbar-actions">
-        <div className="notice-wrap">
-          <button className="icon-button notification" aria-label="Notifications" aria-expanded={noticesOpen} onClick={() => setNoticesOpen((open) => !open)}>
+        <div className="notice-wrap" ref={wrapRef}>
+          <button className="icon-button notification" aria-label={`Notifications${tasks.length ? `, ${tasks.length} to do` : ""}`} aria-expanded={noticesOpen} onClick={() => setNoticesOpen((open) => !open)}>
             <Bell size={19} />
+            {tasks.length > 0 && <span>{tasks.length > 9 ? "9+" : tasks.length}</span>}
           </button>
           {noticesOpen && (
-            <div className="notice-pop" role="status">
-              <strong>Notifications</strong>
-              <p>You’re all caught up. New reviews and schedule changes will show up here.</p>
+            <div className="notice-pop" role="dialog" aria-label="Notifications">
+              <strong>{tasks.length === 0 ? "You’re all caught up" : `${tasks.length} thing${tasks.length === 1 ? "" : "s"} to do`}</strong>
+              {tasks.length === 0 ? (
+                <p>Results to enter, lineups to pick, and reviews to write will show up here.</p>
+              ) : (
+                <div className="notice-list">
+                  {tasks.slice(0, 6).map((task) => (
+                    <button key={task.id} onClick={() => { setNoticesOpen(false); task.go(); }}>
+                      <strong>{task.title}</strong>
+                      <small>{task.detail}</small>
+                    </button>
+                  ))}
+                </div>
+              )}
             </div>
           )}
         </div>
@@ -578,6 +772,9 @@ function Overview({
   onAdd,
   onOpenEvent,
   onOpenReport,
+  profile,
+  tasks,
+  scouting,
 }: {
   events: ScheduleEvent[];
   plays: Play[];
@@ -586,78 +783,93 @@ function Overview({
   onAdd: (kind: "event" | "play" | "player") => void;
   onOpenEvent: (id: string) => void;
   onOpenReport: (id: string) => void;
+  profile: CoachProfile;
+  tasks: Task[];
+  scouting: ScoutReport[];
 }) {
-  const next = events.filter((event) => event.date >= todayISO() && !event.report).sort(bySchedule)[0];
+  const upcoming = events.filter(isUpcoming).sort(bySchedule);
+  const next = upcoming[0];
+  const nextGame = upcoming.find((event) => event.type === "Game");
   const lastGame = latestReported(events);
   const lastTotals = lastGame?.report ? teamTotals(lastGame.report) : null;
   const latestPlay = plays[0];
   const reviewsLeft = players.filter((player) => !player.review).length;
   const nextDate = next ? formatDate(next.date) : null;
+  const record = seasonRecord(events);
+  const scoutedNext = nextGame ? scouting.some((report) => sameOpponent(report.opponent, nextGame.title)) : false;
+  const thisWeek = upcoming.filter((event) => daysUntil(event.date) <= 7).length;
+  const today = new Date().toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric" });
+
   return (
     <>
       <section className="hero">
         <div>
-          <p className="eyebrow light">Monday, October 12</p>
-          <h2>Good afternoon, Coach.</h2>
-          <p>Your team has a big week ahead. Here’s what needs your attention.</p>
+          <p className="eyebrow light">{today}</p>
+          <h2>{greeting()}, Coach {profile.name.split(" ").slice(-1)[0]}.</h2>
+          <p>{thisWeek === 0 ? "Nothing on the calendar this week yet." : `${thisWeek} event${thisWeek === 1 ? "" : "s"} in the next 7 days.`} {tasks.length ? `${tasks.length} item${tasks.length === 1 ? "" : "s"} need your attention.` : "You’re all caught up."}</p>
         </div>
         <div className="hero-record">
-          <div><span>Season record</span><strong>12–4</strong></div>
-          <div><span>League rank</span><strong>#2</strong></div>
+          <div><span>Record</span><strong>{record.games ? record.label : "0–0"}</strong></div>
+          <div><span>Points / game</span><strong>{record.ppg}</strong></div>
+          <div><span>Avg margin</span><strong>{record.games && Number(record.margin) > 0 ? `+${record.margin}` : record.margin}</strong></div>
         </div>
       </section>
 
       <section className="stat-grid">
-        <article className="stat-card">
+        <button className="stat-card" onClick={() => setPage("Schedule")}>
           <div className="stat-icon lime"><CalendarDays size={21} /></div>
           <div>
             <span>Next event</span>
-            <strong>{next ? `${nextDate?.label}` : "Nothing scheduled"}</strong>
+            <strong>{next ? nextDate?.label : "Nothing scheduled"}</strong>
             <small>{next ? `${next.title} · ${formatTime(next.time)}` : "Add a game or practice"}</small>
           </div>
-          <button onClick={() => setPage("Schedule")}><ChevronRight size={18} /></button>
-        </article>
-        <article className="stat-card">
+          <ChevronRight size={18} />
+        </button>
+        <button className="stat-card" onClick={() => setPage("Roster")}>
           <div className="stat-icon blue"><ClipboardList size={21} /></div>
           <div>
             <span>Roster</span>
-            <strong>{players.length === 0 ? "No players" : `${reviewsLeft} to review`}</strong>
-            <small>{players.length === 0 ? "Add your first player" : `${players.length} on the team`}</small>
+            <strong>{players.length === 0 ? "No players yet" : `${players.length} player${players.length === 1 ? "" : "s"}`}</strong>
+            <small>{players.length === 0 ? "Share your team code" : reviewsLeft ? `${reviewsLeft} still need a review` : "Everyone has feedback"}</small>
           </div>
-          <button onClick={() => setPage("Roster")}><ChevronRight size={18} /></button>
-        </article>
-        <article className="stat-card">
+          <ChevronRight size={18} />
+        </button>
+        <button className="stat-card" onClick={() => setPage("Scouting")}>
           <div className="stat-icon orange"><Target size={21} /></div>
-          <div><span>Scouting</span><strong>80% complete</strong><small>Eastview Tigers</small></div>
-          <button onClick={() => setPage("Scouting")}><ChevronRight size={18} /></button>
-        </article>
+          <div>
+            <span>Scouting</span>
+            <strong>{nextGame ? (scoutedNext ? "Report ready" : "Not scouted yet") : `${scouting.length} report${scouting.length === 1 ? "" : "s"}`}</strong>
+            <small>{nextGame ? opponentName(nextGame.title) : "No game coming up"}</small>
+          </div>
+          <ChevronRight size={18} />
+        </button>
       </section>
 
       <section className="dashboard-grid">
         <article className="panel next-game-panel">
           <div className="panel-heading">
-            <div><p className="eyebrow">Next up</p><h3>Game day countdown</h3></div>
+            <div><p className="eyebrow">Next game</p><h3>{nextGame ? (daysUntil(nextGame.date) === 0 ? "Game day" : `${daysUntil(nextGame.date)} day${daysUntil(nextGame.date) === 1 ? "" : "s"} to go`) : "Game day countdown"}</h3></div>
             <button className="text-button" onClick={() => setPage("Schedule")}>View schedule <ChevronRight size={15} /></button>
           </div>
-          {next ? (
+          {nextGame ? (
             <>
               <div className="matchup">
-                <div className="team team-home"><div className="large-badge raven">NR</div><strong>Ravens</strong><span>{next.type}</span></div>
+                <div className="team team-home"><div className="large-badge raven">{initials(profile.teamName)}</div><strong>{profile.teamName}</strong><span>{profile.level}</span></div>
                 <div className="versus">
-                  <p>{nextDate?.label}</p><strong>{formatTime(next.time).split(" ")[0]}</strong><span>{formatTime(next.time).split(" ")[1]}</span><small>{next.location}</small>
+                  <p>{formatDate(nextGame.date).label}</p><strong>{formatTime(nextGame.time).split(" ")[0]}</strong><span>{formatTime(nextGame.time).split(" ")[1]}</span><small>{nextGame.location}</small>
                 </div>
-                <div className="team"><div className="large-badge tiger">{initials(next.title)}</div><strong>{next.title}</strong><span>{next.type}</span></div>
+                <div className="team"><div className="large-badge tiger">{initials(opponentName(nextGame.title))}</div><strong>{opponentName(nextGame.title)}</strong><span>Opponent</span></div>
               </div>
               <div className="game-meta">
-                <span><Clock3 size={15} /> {formatTime(next.time)}</span>
-                <span><ShieldCheck size={15} /> {next.type}</span>
-                <button onClick={() => onOpenEvent(next.id)}>Open event</button>
+                <span><Users size={15} /> {(nextGame.lineup ?? []).length ? `${nextGame.lineup?.length} selected` : "Lineup not picked"}</span>
+                <span><ShieldCheck size={15} /> {scoutedNext ? "Scouted" : "Not scouted"}</span>
+                <button onClick={() => onOpenEvent(nextGame.id)}>Open game</button>
               </div>
             </>
           ) : (
             <div className="panel-empty">
-              <p>Your schedule is empty. Add a game, practice, or film session.</p>
-              <button className="primary-button" onClick={() => onAdd("event")}><Plus size={16} /> Add an event</button>
+              <p>No games on the schedule. Add one to start the countdown.</p>
+              <button className="primary-button" onClick={() => onAdd("event")}><Plus size={16} /> Add a game</button>
             </div>
           )}
         </article>
@@ -665,21 +877,21 @@ function Overview({
         <article className="panel tasks-panel">
           <div className="panel-heading">
             <div><p className="eyebrow">Focus</p><h3>Coach’s checklist</h3></div>
-            <span className="counter">2 / 5</span>
+            <span className="counter">{tasks.length === 0 ? "Clear" : `${tasks.length} open`}</span>
           </div>
-          {[
-            ["Finalize Tigers scouting report", "Due tomorrow", true],
-            ["Review Friday’s game film", "12 clips tagged", true],
-            ["Complete player evaluations", "4 remaining", false],
-            ["Share Wednesday’s game plan", "Not started", false],
-            ["Confirm team availability", "10 of 12 replied", false],
-          ].map(([title, detail, done]) => (
-            <label className={`task ${done ? "done" : ""}`} key={title as string}>
-              <input type="checkbox" defaultChecked={done as boolean} />
-              <span className="custom-check" />
-              <span><strong>{title}</strong><small>{detail}</small></span>
-            </label>
-          ))}
+          {tasks.length === 0 ? (
+            <div className="panel-empty">
+              <p>Nothing waiting on you. Results, lineups, scouting, and reviews show up here when they’re due.</p>
+            </div>
+          ) : (
+            tasks.slice(0, 7).map((task) => (
+              <button className="task" key={task.id} onClick={task.go}>
+                <span className="custom-check" />
+                <span><strong>{task.title}</strong><small>{task.detail}</small></span>
+                <ChevronRight size={15} />
+              </button>
+            ))
+          )}
         </article>
 
         <article className="panel play-panel">
@@ -723,8 +935,8 @@ function Overview({
             </>
           ) : (
             <div className="panel-empty">
-              <p>No game reports yet. After a game, add the score and player stats from the schedule.</p>
-              <button className="primary-button" onClick={() => setPage("Schedule")}><CalendarDays size={16} /> Go to schedule</button>
+              <p>No results yet. After a game, enter the score and box score on the Results page.</p>
+              <button className="primary-button" onClick={() => setPage("Results")}><Trophy size={16} /> Go to results</button>
             </div>
           )}
         </article>
@@ -923,6 +1135,10 @@ function ReportForm({
     const bad = lines.find((line) => line.played && (line.fgm > line.fga || line.tpm > line.tpa || line.ftm > line.fta || line.tpm > line.fgm || line.tpa > line.fga));
     if (bad) {
       setError(`Check ${bad.name}: makes can’t exceed attempts, and threes count inside field goals.`);
+      return;
+    }
+    if (playerPoints > Number(teamScore)) {
+      setError(`Player points add up to ${playerPoints}, more than the final score of ${teamScore}. Check the box score.`);
       return;
     }
     onSave({ teamScore: Number(teamScore), opponentScore: Number(opponentScore), notes: notes.trim(), stats: lines });
@@ -1405,7 +1621,7 @@ function PlayerForm({ initial, onCancel, onSave }: { initial?: Player; onCancel:
       {initial?.accountEmail && <p className="field-hint">This player joined with their own account, so their name, number, and position come from that account.</p>}
       <label>Name<input value={name} onChange={(event) => setName(event.target.value)} placeholder="Marcus Lee" readOnly={Boolean(initial?.accountEmail)} /></label>
       <div className="field-row">
-        <label>Number<input value={number} onChange={(event) => setNumber(event.target.value)} placeholder="4" readOnly={Boolean(initial?.accountEmail)} /></label>
+        <label>Number<input value={number} onChange={(event) => setNumber(digits(event.target.value, 2))} inputMode="numeric" placeholder="4" readOnly={Boolean(initial?.accountEmail)} /></label>
         <label>Position
           <select value={position} disabled={Boolean(initial?.accountEmail)} onChange={(event) => setPosition(event.target.value as Position)}>
             {(["PG", "SG", "SF", "PF", "C"] as Position[]).map((option) => <option key={option}>{option}</option>)}
@@ -1436,51 +1652,53 @@ function EmptyState({ title, detail, action, onAction }: { title: string; detail
   );
 }
 
+const eventTypes: EventType[] = ["Game", "Practice", "Film", "Meeting"];
+
 function SchedulePage({
   events,
   players,
   onAdd,
   onOpen,
-  onReport,
+  onResults,
 }: {
   events: ScheduleEvent[];
   players: Player[];
   onAdd: () => void;
   onOpen: (id: string) => void;
-  onReport: (id: string) => void;
+  onResults: () => void;
 }) {
-  const today = todayISO();
-  const upcoming = events.filter((event) => event.date >= today && !event.report).sort(bySchedule);
-  const results = events
-    .filter((event) => event.date < today || event.report)
-    .sort((a, b) => `${b.date}T${b.time}`.localeCompare(`${a.date}T${a.time}`));
-  const reported = results.filter((event) => event.report);
-  const wins = reported.filter((event) => event.report && resultOf(event.report) === "W").length;
-  const losses = reported.filter((event) => event.report && resultOf(event.report) === "L").length;
+  const [filter, setFilter] = useState<EventType | "All">("All");
+  const [showPast, setShowPast] = useState(false);
+  const upcoming = events.filter(isUpcoming).sort(bySchedule);
+  const visible = upcoming.filter((event) => filter === "All" || event.type === filter);
+  const pastOther = events.filter((event) => !isUpcoming(event) && !isResult(event)).sort(byRecent);
+  const resultsDue = events.filter((event) => canReport(event) && !event.report).length;
 
-  function row(event: ScheduleEvent) {
+  const groups = visible.reduce<{ label: string; items: ScheduleEvent[] }[]>((list, event) => {
+    const label = new Date(`${event.date}T00:00:00`).toLocaleDateString("en-US", { month: "long", year: "numeric" });
+    const last = list[list.length - 1];
+    if (last?.label === label) last.items.push(event);
+    else list.push({ label, items: [event] });
+    return list;
+  }, []);
+
+  function row(event: ScheduleEvent, past = false) {
     const when = formatDate(event.date);
-    const report = event.report;
+    const away = daysUntil(event.date);
+    const lineup = event.lineup ?? [];
     return (
-      <article className="event-row" key={event.id}>
+      <article className={`event-row ${past ? "is-past" : ""}`} key={event.id}>
         <div className="event-date"><span>{when.day}</span><strong>{when.date}</strong></div>
         <div className={`event-stripe ${eventAccent[event.type]}`} />
         <div className="event-info">
-          <span className="tag">{event.type}</span>
+          <span className="tag">{event.type}{!past && away === 0 ? " · Today" : !past && away === 1 ? " · Tomorrow" : ""}</span>
           <h3>{event.title}</h3>
           <p><Clock3 size={14} /> {formatTime(event.time)} · {event.location}</p>
           {event.notes ? <p className="event-notes">{event.notes}</p> : null}
         </div>
-        {report ? (
-          <button className="score-chip" onClick={() => onOpen(event.id)}>
-            <span className={`result-pill result-${resultOf(report)}`}>{resultOf(report)}</span>
-            <strong>{report.teamScore}–{report.opponentScore}</strong>
-          </button>
-        ) : canReport(event) ? (
-          <button className="report-chip" onClick={() => onReport(event.id)}><BarChart3 size={15} /> Add game report</button>
-        ) : event.type === "Game" ? (
-          <button className="report-chip" onClick={() => onOpen(event.id)}>
-            {(event.lineup ?? []).length === 0 ? "Select players" : `${event.lineup?.length} playing`}
+        {event.type === "Game" && !past ? (
+          <button className={`report-chip ${lineup.length ? "is-set" : ""}`} onClick={() => onOpen(event.id)}>
+            <Users size={15} /> {lineup.length === 0 ? "Pick lineup" : `${lineup.length} playing`}
           </button>
         ) : (
           <div className="attendance">
@@ -1504,10 +1722,25 @@ function SchedulePage({
         <div>
           <p className="eyebrow">{upcoming.length === 0 ? "Nothing scheduled" : `${upcoming.length} upcoming event${upcoming.length === 1 ? "" : "s"}`}</p>
           <h2>Upcoming schedule</h2>
-          <p>Games, practices, and team events in one place.</p>
+          <p>Games, practices, and team events. Once a game tips off it moves to Results.</p>
         </div>
         <button className="primary-button" onClick={onAdd}><Plus size={17} /> Add event</button>
       </div>
+      {resultsDue > 0 && (
+        <button className="inline-alert" onClick={onResults}>
+          <Trophy size={17} />
+          <span><strong>{resultsDue} game{resultsDue === 1 ? "" : "s"} waiting for a result.</strong> Enter the score and stats on the Results page.</span>
+          <ChevronRight size={16} />
+        </button>
+      )}
+      {upcoming.length > 0 && (
+        <div className="filter-row">
+          {(["All", ...eventTypes] as const).map((option) => {
+            const count = option === "All" ? upcoming.length : upcoming.filter((event) => event.type === option).length;
+            return <button key={option} className={`filter ${filter === option ? "active" : ""}`} onClick={() => setFilter(option)}>{option === "All" ? "All events" : `${option}s`} <small>{count}</small></button>;
+          })}
+        </div>
+      )}
       {upcoming.length === 0 ? (
         <EmptyState
           title="No upcoming events"
@@ -1515,23 +1748,153 @@ function SchedulePage({
           action="Add event"
           onAction={onAdd}
         />
+      ) : visible.length === 0 ? (
+        <p className="table-empty">No {filter.toLowerCase()}s coming up.</p>
       ) : (
-        <div className="schedule-list">{upcoming.map(row)}</div>
-      )}
-      {results.length > 0 && (
-        <>
-          <div className="section-intro results-intro">
-            <div>
-              <p className="eyebrow">{reported.length === 0 ? "No reports yet" : `Record ${wins}–${losses}`}</p>
-              <h2>Results</h2>
-              <p>Completed games with the final score, box score, and your post-game notes.</p>
-            </div>
+        groups.map((group) => (
+          <div className="schedule-group" key={group.label}>
+            <p className="group-label">{group.label}</p>
+            <div className="schedule-list">{group.items.map((event) => row(event))}</div>
           </div>
-          <div className="schedule-list">{results.map(row)}</div>
-        </>
+        ))
+      )}
+      {pastOther.length > 0 && (
+        <div className="schedule-group">
+          <button className="text-button past-toggle" onClick={() => setShowPast((value) => !value)}>
+            {showPast ? "Hide" : "Show"} past practices and sessions ({pastOther.length}) <ChevronRight size={15} className={showPast ? "is-open" : ""} />
+          </button>
+          {showPast && <div className="schedule-list">{pastOther.map((event) => row(event, true))}</div>}
+        </div>
       )}
     </section>
   );
+}
+
+function ResultsPage({
+  events,
+  onOpen,
+  onReport,
+  teamName,
+}: {
+  events: ScheduleEvent[];
+  onOpen: (id: string) => void;
+  onReport: (id: string) => void;
+  teamName: string;
+}) {
+  const games = events.filter(isResult).sort(byRecent);
+  const due = games.filter((event) => !event.report);
+  const reported = games.filter((event) => event.report);
+  const record = seasonRecord(events);
+  const leaders = seasonLeaders(reported);
+
+  function row(event: ScheduleEvent) {
+    const when = formatDate(event.date);
+    const report = event.report;
+    return (
+      <article className="event-row" key={event.id}>
+        <div className="event-date"><span>{when.day}</span><strong>{when.date}</strong></div>
+        <div className={`event-stripe ${report ? `result-stripe-${resultOf(report)}` : "orange"}`} />
+        <div className="event-info">
+          <span className="tag">{report ? "Final" : "Needs result"}</span>
+          <h3>{event.title}</h3>
+          <p><Clock3 size={14} /> {when.label} · {formatTime(event.time)} · {event.location}</p>
+          {report?.notes ? <p className="event-notes">{report.notes}</p> : null}
+        </div>
+        {report ? (
+          <button className="score-chip" onClick={() => onOpen(event.id)}>
+            <span className={`result-pill result-${resultOf(report)}`}>{resultOf(report)}</span>
+            <strong>{report.teamScore}–{report.opponentScore}</strong>
+          </button>
+        ) : (
+          <button className="report-chip" onClick={() => onReport(event.id)}><BarChart3 size={15} /> Enter result</button>
+        )}
+        <button className="icon-button" aria-label={report ? `Open ${event.title} report` : `Enter result for ${event.title}`} onClick={() => report ? onOpen(event.id) : onReport(event.id)}><ChevronRight size={19} /></button>
+      </article>
+    );
+  }
+
+  return (
+    <section className="page-stack">
+      <div className="section-intro">
+        <div>
+          <p className="eyebrow">{teamName}</p>
+          <h2>Results</h2>
+          <p>Final scores, box scores, and post-game notes for every game that has been played.</p>
+        </div>
+      </div>
+      <div className="summary-grid">
+        <div><span>Record</span><strong>{record.games ? record.label : "0–0"}</strong><small>{record.games} game{record.games === 1 ? "" : "s"} reported</small></div>
+        <div><span>Points for</span><strong>{record.ppg}</strong><small>per game</small></div>
+        <div><span>Points against</span><strong>{record.oppg}</strong><small>per game</small></div>
+        <div><span>Avg margin</span><strong>{record.games && Number(record.margin) > 0 ? `+${record.margin}` : record.margin}</strong><small>per game</small></div>
+      </div>
+      {games.length === 0 ? (
+        <div className="empty-state">
+          <h3>No games played yet</h3>
+          <p>When a game on your schedule tips off, it appears here so you can enter the score and stats.</p>
+        </div>
+      ) : (
+        <div className="results-layout">
+          <div className="page-stack">
+            {due.length > 0 && (
+              <div className="schedule-group">
+                <p className="group-label">Waiting for a result</p>
+                <div className="schedule-list">{due.map(row)}</div>
+              </div>
+            )}
+            {reported.length > 0 && (
+              <div className="schedule-group">
+                <p className="group-label">Completed</p>
+                <div className="schedule-list">{reported.map(row)}</div>
+              </div>
+            )}
+          </div>
+          <aside className="panel leaders-panel">
+            <p className="eyebrow">Season leaders</p>
+            <h3>Per game</h3>
+            {leaders.length === 0 ? (
+              <p className="detail-copy">Leaders show up once a box score is saved.</p>
+            ) : leaders.map((item) => (
+              <div className="leader-row" key={item.label}>
+                <span>{item.label}</span>
+                <strong>{item.name}</strong>
+                <em>{item.value}</em>
+              </div>
+            ))}
+          </aside>
+        </div>
+      )}
+    </section>
+  );
+}
+
+function seasonLeaders(reported: ScheduleEvent[]) {
+  const totals = new Map<string, { name: string; games: number; pts: number; reb: number; ast: number; stl: number }>();
+  for (const event of reported) {
+    for (const line of event.report?.stats ?? []) {
+      if (!line.played) continue;
+      const current = totals.get(line.playerId) ?? { name: line.name, games: 0, pts: 0, reb: 0, ast: 0, stl: 0 };
+      current.name = line.name;
+      current.games += 1;
+      current.pts += points(line);
+      current.reb += line.reb;
+      current.ast += line.ast;
+      current.stl += line.stl;
+      totals.set(line.playerId, current);
+    }
+  }
+  const list = [...totals.values()];
+  if (list.length === 0) return [];
+  const best = (key: "pts" | "reb" | "ast" | "stl") => {
+    const top = [...list].sort((a, b) => b[key] / b.games - a[key] / a.games)[0];
+    return { name: top.name, value: (top[key] / top.games).toFixed(1) };
+  };
+  return [
+    { label: "Points", ...best("pts") },
+    { label: "Rebounds", ...best("reb") },
+    { label: "Assists", ...best("ast") },
+    { label: "Steals", ...best("stl") },
+  ];
 }
 
 function PlaybookPage({
@@ -1586,6 +1949,74 @@ function PlaybookPage({
         </div>
       )}
     </section>
+  );
+}
+
+function SettingsPanel({
+  profile,
+  teamCode,
+  theme,
+  onTheme,
+  onClose,
+}: {
+  profile: CoachProfile;
+  teamCode: string;
+  theme: Theme;
+  onTheme: (theme: Theme) => void;
+  onClose: () => void;
+}) {
+  return (
+    <div className="settings">
+      <section>
+        <p className="eyebrow">Account</p>
+        <div className="settings-profile">
+          <div className="avatar">{initials(profile.name)}</div>
+          <div>
+            <strong>{profile.name}</strong>
+            <span>Head coach · {profile.teamName} · {profile.level} · {profile.season}</span>
+          </div>
+        </div>
+      </section>
+      <section>
+        <p className="eyebrow">Team colour</p>
+        <p className="field-hint">Changes the accent and sidebar colour for you and your players.</p>
+        <div className="swatches">
+          {themes.map((option) => (
+            <button
+              key={option.id}
+              type="button"
+              className={`swatch ${theme.id === option.id ? "active" : ""}`}
+              onClick={() => onTheme(option)}
+              aria-pressed={theme.id === option.id}
+            >
+              <span style={{ background: option.dark }}><i style={{ background: option.accent }} /></span>
+              {option.name}
+            </button>
+          ))}
+          <label className={`swatch ${theme.id === "custom" ? "active" : ""}`}>
+            <span style={{ background: theme.id === "custom" ? theme.dark : "#1b1d1b" }}>
+              <i style={{ background: theme.id === "custom" ? theme.accent : "conic-gradient(#ff6b6b, #ffc94a, #d9ff57, #4fe3c1, #7cc4ff, #c3a1ff, #ff6b6b)" }} />
+            </span>
+            Custom
+            <input type="color" value={theme.accent} onChange={(event) => onTheme(customTheme(event.target.value))} aria-label="Pick a custom colour" />
+          </label>
+        </div>
+        <div className="theme-preview">
+          <span className="primary-button">Primary button</span>
+          <span className="result-pill result-W">W</span>
+          <span className="jersey">23</span>
+          <span className="theme-chip">Active</span>
+        </div>
+      </section>
+      <section>
+        <p className="eyebrow">Players</p>
+        <TeamCodeCard code={teamCode} />
+      </section>
+      <p className="field-hint">Your schedule, playbook, roster, results, and scouting are saved in this browser.</p>
+      <div className="modal-actions">
+        <button className="primary-button" onClick={onClose}>Done</button>
+      </div>
+    </div>
   );
 }
 
@@ -1669,34 +2100,196 @@ function RosterPage({
   );
 }
 
-function ScoutingPage() {
+function ScoutForm({ initial, opponent, onCancel, onSave }: { initial?: ScoutReport; opponent?: string; onCancel: () => void; onSave: (report: ScoutReport) => void }) {
+  const [name, setName] = useState(initial?.opponent ?? opponent ?? "");
+  const [record, setRecord] = useState(initial?.record ?? "");
+  const [offense, setOffense] = useState(initial?.offense ?? "");
+  const [defense, setDefense] = useState(initial?.defense ?? "");
+  const [keyPlayers, setKeyPlayers] = useState<ScoutPlayer[]>(initial?.keyPlayers.length ? initial.keyPlayers : [{ number: "", name: "", note: "" }]);
+  const [keys, setKeys] = useState<string[]>(initial?.keys.length ? [...initial.keys, "", "", ""].slice(0, 3) : ["", "", ""]);
+  const [notes, setNotes] = useState(initial?.notes ?? "");
+  const [error, setError] = useState("");
+
+  function updatePlayer(index: number, change: Partial<ScoutPlayer>) {
+    setKeyPlayers((current) => current.map((player, i) => i === index ? { ...player, ...change } : player));
+  }
+
+  function submit(event: FormEvent) {
+    event.preventDefault();
+    if (!name.trim()) {
+      setError("Enter the opponent’s name.");
+      return;
+    }
+    if (record && !/^\d{1,3}\s*[–-]\s*\d{1,3}$/.test(record.trim())) {
+      setError("Enter their record like 10–6.");
+      return;
+    }
+    onSave({
+      id: initial?.id ?? crypto.randomUUID(),
+      opponent: opponentName(name.trim()),
+      record: record.trim().replace("-", "–"),
+      offense: offense.trim(),
+      defense: defense.trim(),
+      keyPlayers: keyPlayers.filter((player) => player.name.trim()).map((player) => ({ number: player.number.trim(), name: player.name.trim(), note: player.note.trim() })),
+      keys: keys.map((key) => key.trim()).filter(Boolean),
+      notes: notes.trim(),
+      updated: todayISO(),
+    });
+  }
+
+  return (
+    <form onSubmit={submit}>
+      <div className="field-row">
+        <label>Opponent<input value={name} onChange={(e) => setName(e.target.value)} placeholder="Eastview Tigers" /></label>
+        <label>Their record<input value={record} onChange={(e) => setRecord(e.target.value.replace(/[^\d–-]/g, "").slice(0, 7))} placeholder="10–6" inputMode="numeric" /></label>
+      </div>
+      <label>On offense<textarea value={offense} onChange={(e) => setOffense(e.target.value)} placeholder="Pace, favourite sets, who takes the big shots." /></label>
+      <label>On defense<textarea value={defense} onChange={(e) => setDefense(e.target.value)} placeholder="Man or zone, press, how they guard ball screens." /></label>
+
+      <div className="report-section-head"><h4>Key players</h4></div>
+      <div className="scout-players">
+        {keyPlayers.map((player, index) => (
+          <div className="scout-player-row" key={index}>
+            <input aria-label="Number" value={player.number} onChange={(e) => updatePlayer(index, { number: digits(e.target.value, 2) })} placeholder="#" inputMode="numeric" />
+            <input aria-label="Name" value={player.name} onChange={(e) => updatePlayer(index, { name: e.target.value })} placeholder="Player name" />
+            <input aria-label="Scouting note" value={player.note} onChange={(e) => updatePlayer(index, { note: e.target.value })} placeholder="Left-hand driver, shoots off screens" />
+            <button type="button" className="icon-button" aria-label="Remove player" onClick={() => setKeyPlayers((current) => current.length === 1 ? [{ number: "", name: "", note: "" }] : current.filter((_, i) => i !== index))}><X size={15} /></button>
+          </div>
+        ))}
+      </div>
+      {keyPlayers.length < 8 && <button type="button" className="text-button add-row" onClick={() => setKeyPlayers((current) => [...current, { number: "", name: "", note: "" }])}><Plus size={14} /> Add player</button>}
+
+      <div className="report-section-head"><h4>Keys to win</h4></div>
+      {keys.map((key, index) => (
+        <label key={index} className="key-input">
+          <span>{String(index + 1).padStart(2, "0")}</span>
+          <input value={key} onChange={(e) => setKeys((current) => current.map((item, i) => i === index ? e.target.value : item))} placeholder={["Control the glass", "Make them play in the half court", "Protect the corners"][index]} />
+        </label>
+      ))}
+      <label>Other notes<textarea value={notes} onChange={(e) => setNotes(e.target.value)} placeholder="Anything else the staff should know." /></label>
+      {error && <p className="field-error">{error}</p>}
+      <div className="modal-actions">
+        <button className="secondary-button" type="button" onClick={onCancel}>Cancel</button>
+        <button className="primary-button" type="submit">Save report</button>
+      </div>
+    </form>
+  );
+}
+
+function ScoutingPage({
+  reports,
+  events,
+  onNew,
+  onEdit,
+  onDelete,
+}: {
+  reports: ScoutReport[];
+  events: ScheduleEvent[];
+  onNew: (opponent?: string) => void;
+  onEdit: (report: ScoutReport) => void;
+  onDelete: (id: string) => void;
+}) {
+  const upcomingGames = events.filter((event) => event.type === "Game" && isUpcoming(event)).sort(bySchedule);
+  const gameFor = (report: ScoutReport) => upcomingGames.find((event) => sameOpponent(report.opponent, event.title));
+  const sorted = [...reports].sort((a, b) => {
+    const ga = gameFor(a);
+    const gb = gameFor(b);
+    if (ga && gb) return bySchedule(ga, gb);
+    if (ga || gb) return ga ? -1 : 1;
+    return b.updated.localeCompare(a.updated);
+  });
+  const [selectedId, setSelectedId] = useState(sorted[0]?.id ?? "");
+  const selected = sorted.find((report) => report.id === selectedId) ?? sorted[0];
+  const unscouted = upcomingGames.filter((event) => !reports.some((report) => sameOpponent(report.opponent, event.title)));
+  const history = selected ? events.filter((event) => event.report && sameOpponent(event.title, selected.opponent)).sort(byRecent) : [];
+  const game = selected ? gameFor(selected) : undefined;
+
   return (
     <section className="page-stack">
-      <div className="section-intro"><div><p className="eyebrow">Next opponent</p><h2>Eastview Tigers</h2><p>Wednesday, 7:30 PM · Ravens Arena</p></div><button className="primary-button"><FileText size={17} /> Export report</button></div>
-      <div className="scout-hero">
-        <div className="large-badge tiger">ET</div>
-        <div><span className="tag">LEAGUE RANK #4</span><h3>Eastview Tigers</h3><p>10–6 overall · 6–3 away</p></div>
-        <div className="scout-record"><span>Last 5</span><div><i className="w">W</i><i className="w">W</i><i className="l">L</i><i className="w">W</i><i className="l">L</i></div></div>
+      <div className="section-intro no-print">
+        <div>
+          <p className="eyebrow">{reports.length === 0 ? "No reports yet" : `${reports.length} report${reports.length === 1 ? "" : "s"}`}</p>
+          <h2>Scouting</h2>
+          <p>Opponent tendencies, key players, and your game plan, ready to share with staff.</p>
+        </div>
+        <button className="primary-button" onClick={() => onNew()}><Plus size={17} /> New report</button>
       </div>
-      <div className="scout-grid">
-        <article className="panel">
-          <div className="panel-heading"><div><p className="eyebrow">Team profile</p><h3>Key tendencies</h3></div><Sparkles size={19} /></div>
-          {[
-            ["Transition offense", "Push after makes and misses", 86],
-            ["Offensive rebounding", "Crash from both corners", 74],
-            ["Three-point volume", "31 attempts per game", 68],
-            ["Turnover pressure", "Aggressive denial defense", 79],
-          ].map(([title, note, value]) => (
-            <div className="tendency" key={title as string}><div><strong>{title}</strong><span>{note}</span></div><div className="tendency-bar"><i style={{ width: `${value}%` }} /></div></div>
-          ))}
-        </article>
-        <article className="panel keys-card">
-          <p className="eyebrow">Game plan</p><h3>Three keys to win</h3>
-          <div><span>01</span><p><strong>Control the glass</strong>Send all five defenders to rebound before running.</p></div>
-          <div><span>02</span><p><strong>Protect the corners</strong>Force their shooters above the break.</p></div>
-          <div><span>03</span><p><strong>Value each possession</strong>Use pass fakes against their pressure.</p></div>
-        </article>
-      </div>
+
+      {unscouted.length > 0 && (
+        <div className="inline-alert is-static no-print">
+          <Target size={17} />
+          <span><strong>Not scouted yet:</strong> {unscouted.slice(0, 3).map((event) => opponentName(event.title)).join(", ")}{unscouted.length > 3 ? ` and ${unscouted.length - 3} more` : ""}</span>
+          <button className="secondary-button" onClick={() => onNew(opponentName(unscouted[0].title))}>Scout {opponentName(unscouted[0].title)}</button>
+        </div>
+      )}
+
+      {!selected ? (
+        <div className="empty-state">
+          <h3>No scouting reports</h3>
+          <p>Write up an opponent before you play them: how they play, who to stop, and your keys to win.</p>
+          <button className="primary-button" onClick={() => onNew(unscouted[0] ? opponentName(unscouted[0].title) : undefined)}><Plus size={16} /> New report</button>
+        </div>
+      ) : (
+        <>
+          {sorted.length > 1 && (
+            <div className="filter-row no-print">
+              {sorted.map((report) => (
+                <button key={report.id} className={`filter ${report.id === selected.id ? "active" : ""}`} onClick={() => setSelectedId(report.id)}>{report.opponent}</button>
+              ))}
+            </div>
+          )}
+          <div className="print-area">
+            <div className="scout-hero">
+              <div className="large-badge tiger">{initials(selected.opponent)}</div>
+              <div>
+                <span className="tag">{game ? `Next meeting · ${formatDate(game.date).label} · ${formatTime(game.time)}` : "Scouting report"}</span>
+                <h3>{selected.opponent}</h3>
+                <p>{selected.record ? `${selected.record} overall` : "Record not entered"} · Updated {formatDate(selected.updated).label}</p>
+              </div>
+              <div className="scout-record">
+                <span>Your results vs. them</span>
+                <div>
+                  {history.length === 0 ? <em>No games yet</em> : history.slice(0, 5).map((event) => event.report && (
+                    <i key={event.id} className={resultOf(event.report) === "W" ? "w" : "l"} title={`${event.report.teamScore}–${event.report.opponentScore}`}>{resultOf(event.report)}</i>
+                  ))}
+                </div>
+              </div>
+            </div>
+            <div className="scout-grid">
+              <article className="panel">
+                <div className="panel-heading"><div><p className="eyebrow">Team profile</p><h3>How they play</h3></div><Sparkles size={19} /></div>
+                <div className="scout-section"><strong>On offense</strong><p>{selected.offense || "Not written yet."}</p></div>
+                <div className="scout-section"><strong>On defense</strong><p>{selected.defense || "Not written yet."}</p></div>
+                {selected.notes && <div className="scout-section"><strong>Other notes</strong><p>{selected.notes}</p></div>}
+              </article>
+              <article className="panel keys-card">
+                <p className="eyebrow">Game plan</p><h3>Keys to win</h3>
+                {selected.keys.length === 0 ? <p className="detail-copy">No keys written yet.</p> : selected.keys.map((key, index) => (
+                  <div key={index}><span>{String(index + 1).padStart(2, "0")}</span><p><strong>{key}</strong></p></div>
+                ))}
+              </article>
+            </div>
+            <article className="panel">
+              <div className="panel-heading"><div><p className="eyebrow">Personnel</p><h3>Key players</h3></div></div>
+              {selected.keyPlayers.length === 0 ? <p className="detail-copy">No players listed.</p> : (
+                <div className="scout-roster">
+                  {selected.keyPlayers.map((player, index) => (
+                    <div key={index}>
+                      <span className="jersey">{player.number || "–"}</span>
+                      <div><strong>{player.name}</strong><p>{player.note || "No notes."}</p></div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </article>
+          </div>
+          <div className="modal-actions no-print">
+            <button className="danger-button" onClick={() => onDelete(selected.id)}><Trash2 size={15} /> Delete</button>
+            <button className="secondary-button" onClick={() => onEdit(selected)}><Pencil size={15} /> Edit</button>
+            <button className="primary-button" onClick={() => window.print()}><Printer size={15} /> Print or save PDF</button>
+          </div>
+        </>
+      )}
     </section>
   );
 }
@@ -1876,7 +2469,7 @@ function CoachRegister({ onBack, onSignIn, onCreated }: { onBack: () => void; on
               {teamLevels.map((option) => <option key={option}>{option}</option>)}
             </select>
           </label>
-          <label>Season<input value={season} onChange={(event) => setSeason(event.target.value)} inputMode="numeric" placeholder="2026" /></label>
+          <label>Season<input value={season} onChange={(event) => setSeason(digits(event.target.value, 4))} inputMode="numeric" placeholder="2026" /></label>
         </div>
         {error && <p className="form-error">{error}</p>}
         <button className="primary-button login-submit" type="submit">Create account</button>
@@ -1999,7 +2592,7 @@ function PlayerRegister({ onBack, onSignIn, onCreated }: { onBack: () => void; o
         <label>Password<input type="password" value={password} onChange={(event) => setPassword(event.target.value)} placeholder="At least 6 characters" autoComplete="new-password" /></label>
         <label>Confirm password<input type="password" value={confirm} onChange={(event) => setConfirm(event.target.value)} placeholder="Repeat your password" autoComplete="new-password" /></label>
         <div className="field-row">
-          <label>Jersey<input value={number} onChange={(event) => setNumber(event.target.value)} inputMode="numeric" placeholder="4" /></label>
+          <label>Jersey<input value={number} onChange={(event) => setNumber(digits(event.target.value, 2))} inputMode="numeric" placeholder="4" /></label>
           <label>Position
             <select value={position} onChange={(event) => setPosition(event.target.value as Position)}>
               {(["PG", "SG", "SF", "PF", "C"] as Position[]).map((option) => <option key={option}>{option}</option>)}
@@ -2150,7 +2743,11 @@ function ReviewEditor({
           </button>
         ))}
       </div>
-      <label>Rating out of 10<input type="number" min="1" max="10" step="0.1" value={rating} onChange={(event) => setRating(event.target.value)} /></label>
+      <label>Rating out of 10<input inputMode="decimal" value={rating} placeholder="7.5" onChange={(event) => {
+        const value = event.target.value.replace(/[^\d.]/g, "").replace(/(\..*)\./g, "$1");
+        const [whole, fraction] = value.split(".");
+        setRating(fraction === undefined ? whole.slice(0, 2) : `${whole.slice(0, 2)}.${fraction.slice(0, 1)}`);
+      }} /></label>
       <label>Feedback<textarea value={review} onChange={(event) => setReview(event.target.value)} placeholder="What they did well, and one thing to work on." /></label>
       {error && <p className="field-error">{error}</p>}
       <div className="modal-actions">
@@ -2183,6 +2780,21 @@ export default function App() {
     const current = loadSession();
     return current && current.kind !== "player" ? loadList(dataKey(current, "players")) : [];
   });
+  const [scouting, setScouting] = useState<ScoutReport[]>(() => {
+    const current = loadSession();
+    return current && current.kind !== "player" ? loadList(dataKey(current, "scouting")) : [];
+  });
+  const [, setClock] = useState(0);
+
+  useEffect(() => {
+    const timer = window.setInterval(() => setClock((value) => value + 1), 60_000);
+    return () => window.clearInterval(timer);
+  }, []);
+
+  useEffect(() => {
+    if (!session || session.kind === "player") return;
+    localStorage.setItem(dataKey(session, "scouting"), JSON.stringify(scouting));
+  }, [scouting, session]);
 
   useEffect(() => {
     if (!session || session.kind === "player") return;
@@ -2213,6 +2825,7 @@ export default function App() {
     setEvents(loadList(dataKey(next, "events")));
     setPlays(loadList(dataKey(next, "plays")));
     setPlayers(loadList(dataKey(next, "players")));
+    setScouting(loadList(dataKey(next, "scouting")));
     setSession(next);
     sessionStorage.setItem("courtside.session", JSON.stringify(next));
     setPage("Overview");
@@ -2236,6 +2849,35 @@ export default function App() {
 
   const profile = session && session.kind !== "player" ? profileFor(session) : demoProfile;
   const teamCode = session && session.kind !== "player" ? teamCodeFor(session) : demoTeamCode;
+  const playerTeamCode = session?.kind === "player" ? loadPlayerAccounts().find((account) => account.email === session.email)?.teamCode : undefined;
+  const themeCode = screen === "coach" ? teamCode : screen === "player" ? playerTeamCode : undefined;
+  const [theme, setTheme] = useState<Theme>(() => themeCode ? loadTheme(themeCode) : themes[0]);
+
+  useEffect(() => {
+    setTheme(themeCode ? loadTheme(themeCode) : themes[0]);
+  }, [themeCode]);
+
+  useEffect(() => {
+    applyTheme(theme);
+  }, [theme]);
+
+  function chooseTheme(next: Theme) {
+    setTheme(next);
+    localStorage.setItem(themeKey(teamCode), JSON.stringify(next));
+  }
+
+  const tasks = buildTasks(events, players, scouting, {
+    result: (id) => { setPage("Results"); setDialog({ type: "report-form", id }); },
+    event: (id) => { setPage("Schedule"); setDialog({ type: "event", id }); },
+    roster: () => { setPage("Roster"); setDialog({ type: "reviews" }); },
+    scout: (opponent) => { setPage("Scouting"); setDialog({ type: "scout-form", opponent }); },
+  });
+  const resultsDue = events.filter((event) => canReport(event) && !event.report).length;
+
+  function saveScout(report: ScoutReport) {
+    setScouting((current) => current.some((item) => item.id === report.id) ? current.map((item) => item.id === report.id ? report : item) : [report, ...current]);
+    closeDialog();
+  }
 
   function closeDialog() {
     setDialog(null);
@@ -2312,28 +2954,39 @@ export default function App() {
         open={menuOpen}
         setOpen={setMenuOpen}
         rosterCount={players.length}
+        resultsDue={resultsDue}
         profile={profile}
+        events={events}
         onSettings={() => setDialog({ type: "settings" })}
         onSignOut={signOut}
       />
       <main>
-        <Header page={page} profile={profile} onMenu={() => setMenuOpen(true)} />
+        <Header page={page} profile={profile} tasks={tasks} onMenu={() => setMenuOpen(true)} />
         <div className="content">
-          {page === "Overview" && <Overview events={events} plays={plays} players={players} setPage={setPage} onAdd={addKind} onOpenEvent={(id) => { setPage("Schedule"); setDialog({ type: "event", id }); }} onOpenReport={(id) => setDialog({ type: "report", id })} />}
-          {page === "Schedule" && <SchedulePage events={events} players={players} onAdd={() => setDialog({ type: "event-form" })} onOpen={(id) => setDialog({ type: "event", id })} onReport={(id) => setDialog({ type: "report-form", id })} />}
+          {page === "Overview" && <Overview events={events} plays={plays} players={players} profile={profile} tasks={tasks} scouting={scouting} setPage={setPage} onAdd={addKind} onOpenEvent={(id) => { setPage("Schedule"); setDialog({ type: "event", id }); }} onOpenReport={(id) => setDialog({ type: "report", id })} />}
+          {page === "Schedule" && <SchedulePage events={events} players={players} onAdd={() => setDialog({ type: "event-form" })} onOpen={(id) => setDialog({ type: "event", id })} onResults={() => setPage("Results")} />}
+          {page === "Results" && <ResultsPage events={events} teamName={profile.teamName} onOpen={(id) => setDialog({ type: "report", id })} onReport={(id) => setDialog({ type: "report-form", id })} />}
           {page === "Playbook" && <PlaybookPage plays={plays} onAdd={() => setDialog({ type: "play-form" })} onOpen={(id) => setDialog({ type: "play", id })} />}
           {page === "Roster" && <RosterPage players={players} teamCode={teamCode} onAdd={() => setDialog({ type: "player-form" })} onOpen={(id) => setDialog({ type: "player", id })} onReview={() => setDialog({ type: "reviews" })} />}
-          {page === "Scouting" && <ScoutingPage />}
+          {page === "Scouting" && (
+            <ScoutingPage
+              reports={scouting}
+              events={events}
+              onNew={(opponent) => setDialog({ type: "scout-form", opponent })}
+              onEdit={(report) => setDialog({ type: "scout-form", draft: report })}
+              onDelete={(id) => setScouting((current) => current.filter((item) => item.id !== id))}
+            />
+          )}
         </div>
       </main>
       {dialog?.type === "settings" && (
         <Modal title="Settings" onClose={closeDialog}>
-          <p className="detail-copy">You’re signed in as {profile.name}, head coach of the {profile.teamName}.</p>
-          <p className="detail-copy">{profile.level} · {profile.season}. Schedule, playbook, and roster changes stay in this browser.</p>
-          <TeamCodeCard code={teamCode} />
-          <div className="modal-actions">
-            <button className="primary-button" onClick={closeDialog}>Close</button>
-          </div>
+          <SettingsPanel profile={profile} teamCode={teamCode} theme={theme} onTheme={chooseTheme} onClose={closeDialog} />
+        </Modal>
+      )}
+      {dialog?.type === "scout-form" && (
+        <Modal title={dialog.draft ? `Edit ${dialog.draft.opponent}` : "New scouting report"} onClose={closeDialog} wide>
+          <ScoutForm initial={dialog.draft} opponent={dialog.opponent} onCancel={closeDialog} onSave={saveScout} />
         </Modal>
       )}
       {dialog?.type === "event-form" && <Modal title={dialog.draft ? "Edit event" : "Add event"} onClose={closeDialog}><EventForm initial={dialog.draft} onCancel={closeDialog} onSave={saveEvent} /></Modal>}
@@ -2341,28 +2994,32 @@ export default function App() {
       {dialog?.type === "player-form" && <Modal title={dialog.draft ? "Edit player" : "Add player"} onClose={closeDialog}><PlayerForm initial={dialog.draft} onCancel={closeDialog} onSave={savePlayer} /></Modal>}
       {dialog?.type === "event" && openEvent && (
         <Modal title={openEvent.title} onClose={closeDialog} wide={openEvent.type === "Game"}>
-          <p className="detail-line"><span className="tag">{openEvent.type}</span></p>
-          <p className="detail-copy">{formatDate(openEvent.date).label} · {formatTime(openEvent.time)}</p>
-          <p className="detail-copy">{openEvent.location}</p>
-          <p className="detail-line"><span className="tag">Coach notes</span></p>
-          <p className="detail-copy">{openEvent.notes || "No notes for players yet."}</p>
+          <div className="event-detail">
+            <span className={`event-stripe ${eventAccent[openEvent.type]}`} />
+            <div>
+              <span className="tag">{openEvent.type}</span>
+              <p><CalendarDays size={15} /> {formatDate(openEvent.date).label} · {formatTime(openEvent.time)}</p>
+              <p><ShieldCheck size={15} /> {openEvent.location}</p>
+            </div>
+          </div>
+          <div className="report-section-head"><h4>Coach notes</h4><span>Players see these</span></div>
+          <p className="detail-copy report-notes">{openEvent.notes || "No notes for players yet. Use Edit to add some."}</p>
           {openEvent.report && (
             <p className="detail-copy">
               <span className={`result-pill result-${resultOf(openEvent.report)}`}>{resultOf(openEvent.report)}</span>{" "}
               Final {openEvent.report.teamScore}–{openEvent.report.opponentScore}
             </p>
           )}
-          {openEvent.type === "Game" && (
+          {openEvent.type === "Game" && isUpcoming(openEvent) && (
             <LineupPicker players={players} lineup={openEvent.lineup ?? []} onChange={(ids) => setLineup(openEvent.id, ids)} />
           )}
-          {openEvent.type === "Game" && !canReport(openEvent) && <p className="field-hint">The game report opens on game day.</p>}
           <div className="modal-actions">
             <button className="danger-button" onClick={() => { setEvents((current) => current.filter((item) => item.id !== openEvent.id)); closeDialog(); }}><Trash2 size={15} /> Delete</button>
-            <button className="secondary-button" onClick={() => setDialog({ type: "event-form", draft: openEvent })}>Edit</button>
+            <button className="secondary-button" onClick={() => setDialog({ type: "event-form", draft: openEvent })}><Pencil size={15} /> Edit</button>
             {canReport(openEvent) && (
               openEvent.report
-                ? <button className="primary-button" onClick={() => setDialog({ type: "report", id: openEvent.id })}><BarChart3 size={15} /> View game report</button>
-                : <button className="primary-button" onClick={() => setDialog({ type: "report-form", id: openEvent.id })}><BarChart3 size={15} /> Add game report</button>
+                ? <button className="primary-button" onClick={() => setDialog({ type: "report", id: openEvent.id })}><BarChart3 size={15} /> View result</button>
+                : <button className="primary-button" onClick={() => setDialog({ type: "report-form", id: openEvent.id })}><BarChart3 size={15} /> Enter result</button>
             )}
           </div>
         </Modal>
