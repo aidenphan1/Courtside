@@ -178,7 +178,6 @@ type CoachAccount = {
   email: string;
   passwordHash: string;
   teamName: string;
-  level: string;
   season: string;
   teamCode: string;
 };
@@ -198,13 +197,11 @@ type WorkspaceSession = { kind: "demo" } | { kind: "coach"; email: string };
 type CoachProfile = {
   name: string;
   teamName: string;
-  level: string;
   season: string;
   demo: boolean;
 };
 
-const teamLevels = ["Varsity", "JV", "Club", "Rec"];
-const demoProfile: CoachProfile = { name: "Alex Carter", teamName: "Northside Ravens", level: "Varsity", season: "2026", demo: true };
+const demoProfile: CoachProfile = { name: "Alex Carter", teamName: "Northside Ravens", season: "2026", demo: true };
 const demoTeamCode = "RAVENS";
 
 function loadAccounts() {
@@ -231,11 +228,39 @@ function dataKey(session: WorkspaceSession, kind: "events" | "plays" | "players"
   return `courtside.${encodeURIComponent(session.email)}.${kind}`;
 }
 
+function demoDetails() {
+  try {
+    const parsed = JSON.parse(localStorage.getItem("courtside.demo.details") ?? "null") as { teamName?: string; season?: string } | null;
+    if (parsed?.teamName?.trim()) {
+      return {
+        teamName: parsed.teamName.trim(),
+        season: parsed.season?.trim() || demoProfile.season,
+      };
+    }
+  } catch {
+    /* keep the built-in demo team */
+  }
+  return { teamName: demoProfile.teamName, season: demoProfile.season };
+}
+
 function profileFor(session: CoachSession): CoachProfile {
-  if (session.kind !== "coach") return demoProfile;
+  if (session.kind !== "coach") return { ...demoProfile, ...demoDetails() };
   const account = loadAccounts().find((item) => item.email === session.email);
   if (!account) return demoProfile;
-  return { name: account.name, teamName: account.teamName, level: account.level, season: account.season, demo: false };
+  return { name: account.name, teamName: account.teamName, season: account.season, demo: false };
+}
+
+function saveTeamDetails(session: WorkspaceSession, details: { teamName: string; season: string }) {
+  if (session.kind === "demo") {
+    localStorage.setItem("courtside.demo.details", JSON.stringify(details));
+    return;
+  }
+  const accounts = loadAccounts();
+  const account = accounts.find((item) => item.email === session.email);
+  if (!account) return;
+  account.teamName = details.teamName;
+  account.season = details.season;
+  localStorage.setItem("courtside.accounts", JSON.stringify(accounts));
 }
 
 function makeTeamCode(teamName: string) {
@@ -265,12 +290,13 @@ function teamCodeFor(session: WorkspaceSession) {
 function teamByCode(code: string) {
   const normalized = code.trim().toUpperCase();
   if (normalized === demoTeamCode) {
-    return { code: demoTeamCode, name: demoProfile.teamName, coach: demoProfile.name, level: demoProfile.level, eventsKey: "courtside.events", playersKey: "courtside.players" };
+    const details = demoDetails();
+    return { code: demoTeamCode, name: details.teamName, coach: demoProfile.name, season: details.season, eventsKey: "courtside.events", playsKey: "courtside.plays", playersKey: "courtside.players" };
   }
   const account = loadAccounts().find((item) => item.teamCode === normalized);
   if (!account) return null;
   const prefix = `courtside.${encodeURIComponent(account.email)}`;
-  return { code: normalized, name: account.teamName, coach: account.name, level: account.level, eventsKey: `${prefix}.events`, playersKey: `${prefix}.players` };
+  return { code: normalized, name: account.teamName, coach: account.name, season: account.season, eventsKey: `${prefix}.events`, playsKey: `${prefix}.plays`, playersKey: `${prefix}.players` };
 }
 
 function mergeRoster(teamCode: string, existing: Player[]) {
@@ -637,7 +663,7 @@ function Sidebar({
           <div className="team-badge">{initials(profile.teamName)}</div>
           <div>
             <strong>{profile.teamName}</strong>
-            <span>{profile.level} · {profile.season}</span>
+            <span>{profile.season}</span>
           </div>
           <Palette size={16} />
         </button>
@@ -712,7 +738,7 @@ function Header({
     <header className="topbar">
       <button className="icon-button menu-button" onClick={onMenu} aria-label="Open menu"><Menu size={20} /></button>
       <div>
-        <p className="eyebrow">{profile.teamName} · {profile.level}</p>
+        <p className="eyebrow">{profile.teamName} · {profile.season}</p>
         <h1>{page}</h1>
       </div>
       <div className="topbar-actions">
@@ -854,7 +880,7 @@ function Overview({
           {nextGame ? (
             <>
               <div className="matchup">
-                <div className="team team-home"><div className="large-badge raven">{initials(profile.teamName)}</div><strong>{profile.teamName}</strong><span>{profile.level}</span></div>
+                <div className="team team-home"><div className="large-badge raven">{initials(profile.teamName)}</div><strong>{profile.teamName}</strong><span>Home</span></div>
                 <div className="versus">
                   <p>{formatDate(nextGame.date).label}</p><strong>{formatTime(nextGame.time).split(" ")[0]}</strong><span>{formatTime(nextGame.time).split(" ")[1]}</span><small>{nextGame.location}</small>
                 </div>
@@ -1209,7 +1235,7 @@ function ReportForm({
   );
 }
 
-function ReportView({ event, teamName }: { event: ScheduleEvent; teamName: string }) {
+function ReportView({ event, teamName, highlightId }: { event: ScheduleEvent; teamName: string; highlightId?: string }) {
   const report = event.report;
   if (!report) return null;
   const totals = teamTotals(report);
@@ -1275,7 +1301,7 @@ function ReportView({ event, teamName }: { event: ScheduleEvent; teamName: strin
               </thead>
               <tbody>
                 {report.stats.map((line) => (
-                  <tr key={line.playerId} className={line.played ? "" : "is-dnp"}>
+                  <tr key={line.playerId} className={`${line.played ? "" : "is-dnp"}${line.playerId === highlightId ? " is-me" : ""}`}>
                     <td className="player-col"><span className="jersey">{line.number || "–"}</span>{line.name}</td>
                     {line.played ? (
                       <>
@@ -1642,12 +1668,12 @@ function PlayerForm({ initial, onCancel, onSave }: { initial?: Player; onCancel:
   );
 }
 
-function EmptyState({ title, detail, action, onAction }: { title: string; detail: string; action: string; onAction: () => void }) {
+function EmptyState({ title, detail, action, onAction }: { title: string; detail: string; action?: string; onAction?: () => void }) {
   return (
     <div className="empty-state">
       <h3>{title}</h3>
       <p>{detail}</p>
-      <button className="primary-button" onClick={onAction}><Plus size={16} /> {action}</button>
+      {action && onAction && <button className="primary-button" onClick={onAction}><Plus size={16} /> {action}</button>}
     </div>
   );
 }
@@ -1957,14 +1983,38 @@ function SettingsPanel({
   teamCode,
   theme,
   onTheme,
+  onSaveTeam,
   onClose,
 }: {
   profile: CoachProfile;
   teamCode: string;
   theme: Theme;
   onTheme: (theme: Theme) => void;
+  onSaveTeam: (details: { teamName: string; season: string }) => void;
   onClose: () => void;
 }) {
+  const [teamName, setTeamName] = useState(profile.teamName);
+  const [season, setSeason] = useState(profile.season);
+  const [error, setError] = useState("");
+  const [saved, setSaved] = useState(false);
+
+  function saveDetails(event: FormEvent) {
+    event.preventDefault();
+    if (!teamName.trim()) {
+      setError("Enter the team name.");
+      setSaved(false);
+      return;
+    }
+    if (!/^\d{4}$/.test(season)) {
+      setError("Enter the season as a four-digit year.");
+      setSaved(false);
+      return;
+    }
+    onSaveTeam({ teamName: teamName.trim(), season });
+    setError("");
+    setSaved(true);
+  }
+
   return (
     <div className="settings">
       <section>
@@ -1973,9 +2023,21 @@ function SettingsPanel({
           <div className="avatar">{initials(profile.name)}</div>
           <div>
             <strong>{profile.name}</strong>
-            <span>Head coach · {profile.teamName} · {profile.level} · {profile.season}</span>
+            <span>Head coach · {profile.teamName} · {profile.season}</span>
           </div>
         </div>
+      </section>
+      <section>
+        <p className="eyebrow">Team details</p>
+        <p className="field-hint">Fix a spelling mistake here. The team code stays the same, so players who already joined stay on the roster.</p>
+        <form onSubmit={saveDetails}>
+          <label>Team name<input value={teamName} onChange={(event) => { setTeamName(event.target.value); setSaved(false); }} placeholder="Northside Ravens" /></label>
+          <label>Season<input inputMode="numeric" value={season} onChange={(event) => { setSeason(digits(event.target.value, 4)); setSaved(false); }} placeholder="2026" /></label>
+          {error && <p className="field-error">{error}</p>}
+          <div className="modal-actions">
+            <button className="secondary-button" type="submit">{saved ? "Saved" : "Save team details"}</button>
+          </div>
+        </form>
       </section>
       <section>
         <p className="eyebrow">Team colour</p>
@@ -2298,32 +2360,27 @@ type Screen = "home" | "coach-login" | "coach-register" | "coach" | "player-logi
 
 function HomeScreen({ onCoach, onPlayer }: { onCoach: () => void; onPlayer: () => void }) {
   return (
-    <div className="gate">
-      <header className="gate-nav">
+    <div className="gate gate-home">
+      <div className="gate-stage">
         <Logo />
-        <button className="gate-signin" onClick={onCoach}>Coach sign in</button>
-      </header>
-      <section className="gate-hero">
         <p className="eyebrow light">For coaches and players</p>
         <h2>Your season, in one place.</h2>
         <p>Playbooks, game reviews, the schedule, and scouting reports for the people who run the team.</p>
-      </section>
-      <section className="role-grid">
-        <button className="role-card" onClick={onCoach}>
-          <span className="role-icon"><Users size={22} /></span>
-          <span className="tag">Available now</span>
-          <strong>I’m a coach</strong>
-          <span>Open the team workspace: playbook, roster, schedule, and scouting.</span>
-          <em>Continue <ChevronRight size={15} /></em>
-        </button>
-        <button className="role-card" onClick={onPlayer}>
-          <span className="role-icon"><UserRound size={22} /></span>
-          <span className="tag">Available now</span>
-          <strong>I’m a player</strong>
-          <span>Join your team with the code from your coach, then see the schedule and game notes.</span>
-          <em>Sign in <ChevronRight size={15} /></em>
-        </button>
-      </section>
+        <section className="role-grid">
+          <button className="role-card" onClick={onCoach}>
+            <span className="role-icon"><Users size={22} /></span>
+            <strong>I’m a coach</strong>
+            <span>Open the team workspace: playbook, roster, schedule, and scouting.</span>
+            <em>Continue <ChevronRight size={15} /></em>
+          </button>
+          <button className="role-card" onClick={onPlayer}>
+            <span className="role-icon"><UserRound size={22} /></span>
+            <strong>I’m a player</strong>
+            <span>Join your team with the code from your coach, then see the schedule and game notes.</span>
+            <em>Sign in <ChevronRight size={15} /></em>
+          </button>
+        </section>
+      </div>
     </div>
   );
 }
@@ -2405,7 +2462,6 @@ function CoachRegister({ onBack, onSignIn, onCreated }: { onBack: () => void; on
   const [password, setPassword] = useState("");
   const [confirm, setConfirm] = useState("");
   const [teamName, setTeamName] = useState("");
-  const [level, setLevel] = useState(teamLevels[0]);
   const [season, setSeason] = useState("2026");
   const [error, setError] = useState("");
 
@@ -2442,7 +2498,6 @@ function CoachRegister({ onBack, onSignIn, onCreated }: { onBack: () => void; on
       email: normalized,
       passwordHash: await hashPassword(password),
       teamName: teamName.trim(),
-      level,
       season,
       teamCode: makeTeamCode(teamName),
     };
@@ -2463,14 +2518,7 @@ function CoachRegister({ onBack, onSignIn, onCreated }: { onBack: () => void; on
         <label>Password<input type="password" value={password} onChange={(event) => setPassword(event.target.value)} placeholder="At least 6 characters" autoComplete="new-password" /></label>
         <label>Confirm password<input type="password" value={confirm} onChange={(event) => setConfirm(event.target.value)} placeholder="Repeat your password" autoComplete="new-password" /></label>
         <label>Team name<input value={teamName} onChange={(event) => setTeamName(event.target.value)} placeholder="Northside Ravens" /></label>
-        <div className="field-row">
-          <label>Level
-            <select value={level} onChange={(event) => setLevel(event.target.value)}>
-              {teamLevels.map((option) => <option key={option}>{option}</option>)}
-            </select>
-          </label>
-          <label>Season<input value={season} onChange={(event) => setSeason(digits(event.target.value, 4))} inputMode="numeric" placeholder="2026" /></label>
-        </div>
+        <label>Season<input value={season} onChange={(event) => setSeason(digits(event.target.value, 4))} inputMode="numeric" placeholder="2026" /></label>
         {error && <p className="form-error">{error}</p>}
         <button className="primary-button login-submit" type="submit">Create account</button>
         <button className="text-button demo-link" type="button" onClick={onSignIn}>Already have an account? Sign in</button>
@@ -2608,8 +2656,55 @@ function PlayerRegister({ onBack, onSignIn, onCreated }: { onBack: () => void; o
   );
 }
 
+type PlayerPage = "Home" | "Schedule" | "Results" | "Playbook" | "Team";
+
+const playerNavigation: { label: PlayerPage; icon: typeof LayoutDashboard }[] = [
+  { label: "Home", icon: LayoutDashboard },
+  { label: "Schedule", icon: CalendarDays },
+  { label: "Results", icon: Trophy },
+  { label: "Playbook", icon: NotebookTabs },
+  { label: "Team", icon: Users },
+];
+
+function lineupLabel(event: ScheduleEvent, playerId: string) {
+  if (event.type !== "Game") return null;
+  const lineup = event.lineup ?? [];
+  if (lineup.length === 0) return { text: "Lineup not posted", kind: "open" as const };
+  if (lineup.includes(playerId)) return { text: "You’re in", kind: "in" as const };
+  return { text: "Not selected", kind: "out" as const };
+}
+
+function playerAverages(events: ScheduleEvent[], playerId: string) {
+  const played = events.flatMap((event) => {
+    const line = event.report?.stats.find((item) => item.playerId === playerId && item.played);
+    return line ? [line] : [];
+  });
+  const average = (score: (line: StatLine) => number) => played.length === 0 ? "—" : (played.reduce((total, line) => total + score(line), 0) / played.length).toFixed(1);
+  return { games: played.length, ppg: average(points), rpg: average((line) => line.reb), apg: average((line) => line.ast), spg: average((line) => line.stl) };
+}
+
+function savePlayerProfile(email: string, change: { name: string; number: string; position: Position }) {
+  const accounts = loadPlayerAccounts();
+  const account = accounts.find((item) => item.email === email);
+  if (!account) return;
+  account.name = change.name;
+  account.number = change.number;
+  account.position = change.position;
+  localStorage.setItem("courtside.playerAccounts", JSON.stringify(accounts));
+  const team = teamByCode(account.teamCode);
+  if (!team) return;
+  const roster = loadList<Player>(team.playersKey).map((player) => player.accountEmail === email ? { ...player, ...change } : player);
+  localStorage.setItem(team.playersKey, JSON.stringify(roster));
+}
+
 function PlayerHome({ email, onSignOut }: { email: string; onSignOut: () => void }) {
+  const [page, setPage] = useState<PlayerPage>("Home");
+  const [menuOpen, setMenuOpen] = useState(false);
+  const [noticesOpen, setNoticesOpen] = useState(false);
+  const [view, setView] = useState<null | { type: "play"; id: string } | { type: "report"; id: string } | { type: "profile" }>(null);
   const [tick, setTick] = useState(0);
+  const noticeRef = useRef<HTMLDivElement>(null);
+
   useEffect(() => {
     const bump = () => setTick((value) => value + 1);
     window.addEventListener("focus", bump);
@@ -2620,76 +2715,426 @@ function PlayerHome({ email, onSignOut }: { email: string; onSignOut: () => void
     };
   }, []);
 
+  useEffect(() => {
+    if (!noticesOpen) return;
+    function close(event: MouseEvent) {
+      if (!noticeRef.current?.contains(event.target as Node)) setNoticesOpen(false);
+    }
+    document.addEventListener("mousedown", close);
+    return () => document.removeEventListener("mousedown", close);
+  }, [noticesOpen]);
+
   const account = loadPlayerAccounts().find((item) => item.email === email);
   if (!account) return null;
   const team = teamByCode(account.teamCode);
   const events = team ? loadList<ScheduleEvent>(team.eventsKey) : [];
+  const plays = team ? loadList<Play>(team.playsKey) : [];
   const roster = team ? loadList<Player>(team.playersKey) : [];
-  const me = roster.find((player) => player.accountEmail === account.email);
-  const mine = me?.id ?? `acct:${account.email}`;
-  const upcoming = events.filter((event) => event.date >= todayISO() && !event.report).sort(bySchedule);
   void tick;
 
-  return (
-    <div className="player-shell">
-      <header className="player-bar">
-        <Logo />
-        <div>
-          <p className="eyebrow">{team?.name ?? "Team"} / #{account.number} {account.position}</p>
-          <h1>{account.name}</h1>
+  const me = roster.find((player) => player.accountEmail === account.email);
+  const mine = me?.id ?? `acct:${account.email}`;
+  const self = {
+    id: mine,
+    name: account.name,
+    number: account.number,
+    position: account.position,
+    status: me?.status ?? "Ready",
+    rating: me?.rating ?? "",
+    review: me?.review ?? "",
+  };
+  const upcoming = events.filter(isUpcoming).sort(bySchedule);
+  const next = upcoming[0];
+  const nextGame = upcoming.find((event) => event.type === "Game");
+  const games = events.filter(isResult).sort(byRecent);
+  const averages = playerAverages(events, mine);
+  const record = seasonRecord(events);
+  const today = new Date().toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric" });
+  const openPlay = plays.find((play) => view?.type === "play" && play.id === view.id);
+  const openReport = events.find((event) => view?.type === "report" && event.id === view.id);
+
+  const notices = [
+    ...upcoming.filter((event) => event.type === "Game" && (event.lineup ?? []).length > 0).slice(0, 2).map((event) => {
+      const status = lineupLabel(event, mine);
+      return { id: `line-${event.id}`, title: status?.text ?? "Lineup posted", detail: `${event.title} · ${formatDate(event.date).label}`, go: () => setPage("Schedule") };
+    }),
+    ...upcoming.filter((event) => event.notes).slice(0, 3).map((event) => ({
+      id: `note-${event.id}`,
+      title: `Note for ${event.title}`,
+      detail: event.notes,
+      go: () => setPage("Schedule"),
+    })),
+    ...(self.review ? [{ id: "review", title: "Coach left you feedback", detail: self.rating ? `Rated ${self.rating} / 10` : "Open Home to read it", go: () => setPage("Home") }] : []),
+  ];
+
+  function go(nextPage: PlayerPage) {
+    setPage(nextPage);
+    setMenuOpen(false);
+  }
+
+  function eventRow(event: ScheduleEvent) {
+    const when = formatDate(event.date);
+    const status = lineupLabel(event, mine);
+    const line = event.report?.stats.find((item) => item.playerId === mine);
+    return (
+      <article className="event-row" key={event.id}>
+        <div className="event-date"><span>{when.day}</span><strong>{when.date}</strong></div>
+        <div className={`event-stripe ${event.report ? `result-stripe-${resultOf(event.report)}` : eventAccent[event.type]}`} />
+        <div className="event-info">
+          <span className="tag">{event.type}{!event.report && daysUntil(event.date) === 0 ? " · Today" : !event.report && daysUntil(event.date) === 1 ? " · Tomorrow" : ""}</span>
+          <h3>{event.title}</h3>
+          <p><Clock3 size={14} /> {formatTime(event.time)} · {event.location}</p>
+          {event.notes ? <p className="event-notes">{event.notes}</p> : null}
         </div>
-        <button className="secondary-button" onClick={onSignOut}>Sign out</button>
-      </header>
-      <main className="content">
-        <section className="hero player-hero">
+        {event.report ? (
+          <button className="score-chip" onClick={() => setView({ type: "report", id: event.id })}>
+            <span className={`result-pill result-${resultOf(event.report)}`}>{resultOf(event.report)}</span>
+            <strong>{event.report.teamScore}–{event.report.opponentScore}</strong>
+            {line?.played && <em className="your-line">{points(line)} pts</em>}
+          </button>
+        ) : status ? (
+          <span className={`availability is-${status.kind}`}>{status.text}</span>
+        ) : <span />}
+        {event.report ? (
+          <button className="icon-button" aria-label={`Open ${event.title}`} onClick={() => setView({ type: "report", id: event.id })}><ChevronRight size={19} /></button>
+        ) : <span />}
+      </article>
+    );
+  }
+
+  return (
+    <div className="app-shell">
+      <aside className={`sidebar ${menuOpen ? "is-open" : ""}`}>
+        <div className="sidebar-top">
+          <Logo />
+          <button className="icon-button mobile-close" onClick={() => setMenuOpen(false)} aria-label="Close menu"><X size={19} /></button>
+        </div>
+        <div className="team-switcher is-static">
+          <div className="team-badge">{initials(team?.name ?? "Team")}</div>
           <div>
-            <p className="eyebrow light">{team ? `${team.level} · Coach ${team.coach}` : "Team code not found"}</p>
-            <h2>{team ? `You’re on the ${team.name}.` : "We couldn’t find that team."}</h2>
-            <p>Your coach picks the lineup before each game. Notes they write on the schedule show up here.</p>
+            <strong>{team?.name ?? "No team"}</strong>
+            <span>{team ? team.season : account.teamCode}</span>
           </div>
-        </section>
-        <section className="page-stack">
-          <div className="section-intro">
+        </div>
+        <nav>
+          <p className="eyebrow nav-label">Your team</p>
+          {playerNavigation.map(({ label, icon: Icon }) => (
+            <button key={label} className={`nav-item ${page === label ? "active" : ""}`} onClick={() => go(label)}>
+              <Icon size={19} strokeWidth={1.8} />
+              <span>{label}</span>
+            </button>
+          ))}
+        </nav>
+        <div className="sidebar-spacer" />
+        <button className="season-card" onClick={() => go("Results")}>
+          <div className="season-head">
+            <div className="season-icon"><Trophy size={17} /></div>
             <div>
-              <p className="eyebrow">{upcoming.length === 0 ? "Nothing coming up" : `${upcoming.length} upcoming`}</p>
-              <h2>Your schedule</h2>
+              <span>Your season</span>
+              <strong>{averages.games === 0 ? "No games yet" : `${averages.ppg} PPG`}</strong>
             </div>
           </div>
-          {upcoming.length === 0 ? (
-            <p className="detail-copy">No upcoming events yet.</p>
-          ) : (
-            <div className="schedule-list">
-              {upcoming.map((event) => {
-                const when = formatDate(event.date);
-                const playing = event.type === "Game" && (event.lineup ?? []).includes(mine);
-                const decided = event.type === "Game" && (event.lineup ?? []).length > 0;
-                return (
-                  <article className="event-row" key={event.id}>
-                    <div className="event-date"><span>{when.day}</span><strong>{when.date}</strong></div>
-                    <div className={`event-stripe ${eventAccent[event.type]}`} />
-                    <div className="event-info">
-                      <span className="tag">{event.type}</span>
-                      <h3>{event.title}</h3>
-                      <p><Clock3 size={14} /> {formatTime(event.time)} · {event.location}</p>
-                      {event.notes ? <p className="event-notes">{event.notes}</p> : <p className="event-notes">No coach notes for this one yet.</p>}
+          <small>{averages.games === 0 ? "Stats appear after your coach enters a result" : `${averages.games} game${averages.games === 1 ? "" : "s"} played`}</small>
+        </button>
+        <button className="nav-item" onClick={() => setView({ type: "profile" })}><UserRound size={19} /><span>My details</span></button>
+        <button className="nav-item" onClick={onSignOut}><LogOut size={19} /><span>Sign out</span></button>
+        <div className="coach-profile">
+          <div className="avatar">{initials(account.name)}</div>
+          <div><strong>{account.name}</strong><span>#{account.number} · {account.position}</span></div>
+        </div>
+      </aside>
+      {menuOpen && <button className="backdrop" onClick={() => setMenuOpen(false)} aria-label="Close menu" />}
+      <main>
+        <header className="topbar">
+          <button className="icon-button menu-button" onClick={() => setMenuOpen(true)} aria-label="Open menu"><Menu size={20} /></button>
+          <div>
+            <p className="eyebrow">{team ? `${team.name} · ${team.season}` : "Player"}</p>
+            <h1>{page}</h1>
+          </div>
+          <div className="topbar-actions">
+            <div className="notice-wrap" ref={noticeRef}>
+              <button className="icon-button notification" aria-label={`Updates${notices.length ? `, ${notices.length}` : ""}`} aria-expanded={noticesOpen} onClick={() => setNoticesOpen((open) => !open)}>
+                <Bell size={19} />
+                {notices.length > 0 && <span>{notices.length > 9 ? "9+" : notices.length}</span>}
+              </button>
+              {noticesOpen && (
+                <div className="notice-pop" role="dialog" aria-label="Updates">
+                  <strong>{notices.length === 0 ? "Nothing new" : `${notices.length} update${notices.length === 1 ? "" : "s"}`}</strong>
+                  {notices.length === 0 ? (
+                    <p>Lineups, coach notes, and feedback show up here.</p>
+                  ) : (
+                    <div className="notice-list">
+                      {notices.map((notice) => (
+                        <button key={notice.id} onClick={() => { setNoticesOpen(false); notice.go(); }}>
+                          <strong>{notice.title}</strong>
+                          <small>{notice.detail}</small>
+                        </button>
+                      ))}
                     </div>
-                    {event.type === "Game" && (
-                      <span className={`result-pill ${playing ? "result-W" : "result-T"}`}>{playing ? "You’re in" : decided ? "Not selected" : "Lineup open"}</span>
-                    )}
-                  </article>
-                );
-              })}
+                  )}
+                </div>
+              )}
             </div>
+          </div>
+        </header>
+        <div className="content">
+          {page === "Home" && (
+            <>
+              <section className="hero">
+                <div>
+                  <p className="eyebrow light">{today}</p>
+                  <h2>{greeting()}, {account.name.split(" ")[0]}.</h2>
+                  <p>{team ? `Coach ${team.coach}.` : "Ask your coach to confirm the team code."} {next ? `Next up is ${next.title}.` : "Nothing is on the calendar yet."}</p>
+                </div>
+                <div className="hero-record">
+                  <div><span>Team</span><strong>{record.games ? record.label : "0–0"}</strong></div>
+                  <div><span>Your PPG</span><strong>{averages.ppg}</strong></div>
+                  <div><span>Games</span><strong>{averages.games}</strong></div>
+                </div>
+              </section>
+              <section className="stat-grid">
+                <button className="stat-card" onClick={() => go("Schedule")}>
+                  <div className="stat-icon lime"><CalendarDays size={21} /></div>
+                  <div>
+                    <span>Next event</span>
+                    <strong>{next ? formatDate(next.date).label : "Nothing scheduled"}</strong>
+                    <small>{next ? `${next.title} · ${formatTime(next.time)}` : "Your coach hasn’t added one"}</small>
+                  </div>
+                  <ChevronRight size={18} />
+                </button>
+                <button className="stat-card" onClick={() => go("Schedule")}>
+                  <div className="stat-icon blue"><Users size={21} /></div>
+                  <div>
+                    <span>Next game</span>
+                    <strong>{nextGame ? (lineupLabel(nextGame, mine)?.text ?? "Game day") : "No game coming up"}</strong>
+                    <small>{nextGame ? opponentName(nextGame.title) : "Lineups appear here once posted"}</small>
+                  </div>
+                  <ChevronRight size={18} />
+                </button>
+                <button className="stat-card" onClick={() => go("Results")}>
+                  <div className="stat-icon orange"><Trophy size={21} /></div>
+                  <div>
+                    <span>Last result</span>
+                    <strong>{games[0]?.report ? `${resultOf(games[0].report)} ${games[0].report.teamScore}–${games[0].report.opponentScore}` : "No results yet"}</strong>
+                    <small>{games[0] ? opponentName(games[0].title) : "After the game, the score shows up here"}</small>
+                  </div>
+                  <ChevronRight size={18} />
+                </button>
+              </section>
+              <section className="dashboard-grid">
+                <article className="panel">
+                  <div className="panel-heading">
+                    <div><p className="eyebrow">From your coach</p><h3>{self.review ? "Latest feedback" : "No feedback yet"}</h3></div>
+                    {self.rating && <span className="theme-chip">{self.rating} / 10</span>}
+                  </div>
+                  <p className="detail-copy report-notes">{self.review || "When your coach writes a review, it stays here for you. Teammates can’t see it."}</p>
+                </article>
+                <article className="panel">
+                  <div className="panel-heading">
+                    <div><p className="eyebrow">Coming up</p><h3>{upcoming.length === 0 ? "Clear calendar" : `${upcoming.length} event${upcoming.length === 1 ? "" : "s"}`}</h3></div>
+                    <button className="text-button" onClick={() => go("Schedule")}>Full schedule <ChevronRight size={15} /></button>
+                  </div>
+                  {upcoming.length === 0 ? (
+                    <div className="panel-empty"><p>Practices, games, and coach notes will show up here.</p></div>
+                  ) : upcoming.slice(0, 3).map((event) => (
+                    <button className="task" key={event.id} onClick={() => go("Schedule")}>
+                      <span className="custom-check" />
+                      <span><strong>{event.title}</strong><small>{formatDate(event.date).label} · {formatTime(event.time)}{event.notes ? ` · ${event.notes}` : ""}</small></span>
+                      <ChevronRight size={15} />
+                    </button>
+                  ))}
+                </article>
+              </section>
+            </>
           )}
-          <article className="panel">
-            <p className="eyebrow">From your coach</p>
-            <h3>{me?.review ? "Latest feedback" : "No feedback yet"}</h3>
-            <p className="detail-copy">{me?.review || "Reviews your coach writes on the roster will show up here."}</p>
-            {me?.rating && <p className="detail-copy">Last rating {me.rating} / 10</p>}
-          </article>
-        </section>
+
+          {page === "Schedule" && (
+            <section className="page-stack">
+              <div className="section-intro">
+                <div>
+                  <p className="eyebrow">{upcoming.length === 0 ? "Nothing scheduled" : `${upcoming.length} upcoming`}</p>
+                  <h2>Schedule</h2>
+                  <p>Games, practices, and the notes your coach wants you to read. Games move to Results once they’ve been played.</p>
+                </div>
+              </div>
+              {upcoming.length === 0 ? (
+                <EmptyState title="Nothing coming up" detail="When your coach adds a practice or game, it shows up here with their notes." />
+              ) : (
+                <div className="schedule-list">{upcoming.map(eventRow)}</div>
+              )}
+            </section>
+          )}
+
+          {page === "Results" && (
+            <section className="page-stack">
+              <div className="section-intro">
+                <div>
+                  <p className="eyebrow">{team?.name ?? "Team"} · {record.games ? record.label : "0–0"}</p>
+                  <h2>Results</h2>
+                  <p>Final scores and your line from each game. Your row is highlighted in the box score.</p>
+                </div>
+              </div>
+              <div className="summary-grid">
+                <div><span>Points</span><strong>{averages.ppg}</strong><small>per game</small></div>
+                <div><span>Rebounds</span><strong>{averages.rpg}</strong><small>per game</small></div>
+                <div><span>Assists</span><strong>{averages.apg}</strong><small>per game</small></div>
+                <div><span>Steals</span><strong>{averages.spg}</strong><small>per game you played</small></div>
+              </div>
+              {games.length === 0 ? (
+                <EmptyState title="No games played yet" detail="Once a game is over and your coach enters the score, it appears here." />
+              ) : (
+                <div className="schedule-list">{games.map(eventRow)}</div>
+              )}
+            </section>
+          )}
+
+          {page === "Playbook" && (
+            <PlayerPlaybook plays={plays} onOpen={(id) => setView({ type: "play", id })} />
+          )}
+
+          {page === "Team" && (
+            <section className="page-stack">
+              <div className="section-intro">
+                <div>
+                  <p className="eyebrow">{team ? `Coach ${team.coach}` : "Team"}</p>
+                  <h2>{team?.name ?? "Your team"}</h2>
+                  <p>{roster.length === 0 ? "You’re the first one here." : `${roster.length} player${roster.length === 1 ? "" : "s"} on the roster.`}</p>
+                </div>
+              </div>
+              {roster.length === 0 ? (
+                <EmptyState title="Roster not posted yet" detail="You’ll appear here after your coach opens the team. Your own details are under My details." />
+              ) : (
+                <div className="panel roster-table is-public">
+                  <div className="table-head"><span>Player</span><span>Position</span><span>Status</span></div>
+                  {roster.map((player) => {
+                    const you = player.accountEmail === account.email || player.id === mine;
+                    return (
+                      <div className={`player-row ${you ? "is-you" : ""}`} key={player.id}>
+                        <div className="player-name"><div className="avatar player-avatar">{initials(player.name)}</div><div><strong>{player.name}</strong><span>#{player.number}{you ? " · You" : ""}</span></div></div>
+                        <strong>{player.position}</strong>
+                        <span className={`status ${player.status.toLowerCase()}`}>{player.status}</span>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </section>
+          )}
+        </div>
       </main>
+
+      {view?.type === "play" && openPlay && (
+        <Modal title={openPlay.name} onClose={() => setView(null)} wide={Boolean(openPlay.videoUrl || openPlay.diagram)}>
+          {openPlay.videoUrl ? <PlayVideo url={openPlay.videoUrl} /> : null}
+          {openPlay.diagram ? <img className="diagram-preview" src={openPlay.diagram} alt="" /> : null}
+          {!openPlay.videoUrl && !openPlay.diagram && <MiniCourt />}
+          <p className="detail-line"><span className="tag">{openPlay.category}</span></p>
+          <p className="detail-copy">{openPlay.notes || "No notes on this play yet."}</p>
+          <div className="modal-actions">
+            <button className="primary-button" onClick={() => setView(null)}>Close</button>
+          </div>
+        </Modal>
+      )}
+      {view?.type === "report" && openReport?.report && team && (
+        <Modal title="Game report" onClose={() => setView(null)} wide>
+          <ReportView event={openReport} teamName={team.name} highlightId={mine} />
+        </Modal>
+      )}
+      {view?.type === "profile" && (
+        <PlayerProfile account={account} onClose={() => setView(null)} onSaved={() => { setView(null); setTick((value) => value + 1); }} />
+      )}
     </div>
+  );
+}
+
+function PlayerPlaybook({ plays, onOpen }: { plays: Play[]; onOpen: (id: string) => void }) {
+  const [filter, setFilter] = useState<(typeof playFilters)[number]>("All plays");
+  const visible = plays.filter((play) => filter === "All plays" || play.category === filter);
+
+  return (
+    <section className="page-stack">
+      <div className="section-intro">
+        <div>
+          <p className="eyebrow">{plays.length === 0 ? "Nothing in the book" : `${plays.length} play${plays.length === 1 ? "" : "s"}`}</p>
+          <h2>Playbook</h2>
+          <p>Watch the film and study the diagrams your coach put in the book.</p>
+        </div>
+      </div>
+      {plays.length > 0 && (
+        <div className="filter-row">
+          {playFilters.map((option) => (
+            <button key={option} className={`filter ${filter === option ? "active" : ""}`} onClick={() => setFilter(option)}>{option}</button>
+          ))}
+        </div>
+      )}
+      {visible.length === 0 ? (
+        <EmptyState title={plays.length === 0 ? "No plays yet" : "Nothing in this view"} detail={plays.length === 0 ? "Plays your coach adds will show up here, including video." : "This category is empty."} />
+      ) : (
+        <div className="playbook-grid">
+          {visible.map((play, index) => (
+            <article className="play-card" key={play.id}>
+              <button className={`diagram thumb-play variant-${index % 4} ${play.videoUrl ? "has-video" : ""}`} onClick={() => onOpen(play.id)} aria-label={play.videoUrl ? `Play ${play.name}` : `Open ${play.name}`}>
+                <PlayArt play={play} />
+                {play.videoUrl && <span><Play size={16} fill="currentColor" /></span>}
+              </button>
+              <button className="play-card-copy" onClick={() => onOpen(play.id)}>
+                <span className="tag">{play.category}</span>
+                <h3>{play.name}</h3>
+                <p>{play.videoUrl ? "Video ready to play" : play.diagram ? "Diagram saved" : play.notes || "No notes yet"}</p>
+              </button>
+            </article>
+          ))}
+        </div>
+      )}
+    </section>
+  );
+}
+
+function PlayerProfile({
+  account,
+  onClose,
+  onSaved,
+}: {
+  account: PlayerAccount;
+  onClose: () => void;
+  onSaved: () => void;
+}) {
+  const [name, setName] = useState(account.name);
+  const [number, setNumber] = useState(account.number);
+  const [position, setPosition] = useState<Position>(account.position);
+  const [error, setError] = useState("");
+
+  function submit(event: FormEvent) {
+    event.preventDefault();
+    if (!name.trim() || !number.trim()) {
+      setError("Enter your name and jersey number.");
+      return;
+    }
+    savePlayerProfile(account.email, { name: name.trim(), number, position });
+    onSaved();
+  }
+
+  return (
+    <Modal title="My details" onClose={onClose}>
+      <form onSubmit={submit}>
+        <p className="field-hint">Your coach sees this name and number on the roster. The team code stays {account.teamCode}.</p>
+        <label>Name<input value={name} onChange={(event) => setName(event.target.value)} /></label>
+        <div className="field-row">
+          <label>Jersey<input inputMode="numeric" value={number} onChange={(event) => setNumber(digits(event.target.value, 2))} /></label>
+          <label>Position
+            <select value={position} onChange={(event) => setPosition(event.target.value as Position)}>
+              {(["PG", "SG", "SF", "PF", "C"] as Position[]).map((option) => <option key={option}>{option}</option>)}
+            </select>
+          </label>
+        </div>
+        <label>Email<input value={account.email} readOnly /></label>
+        {error && <p className="field-error">{error}</p>}
+        <div className="modal-actions">
+          <button className="secondary-button" type="button" onClick={onClose}>Cancel</button>
+          <button className="primary-button" type="submit">Save</button>
+        </div>
+      </form>
+    </Modal>
   );
 }
 
@@ -2847,7 +3292,13 @@ export default function App() {
     setScreen("home");
   }
 
-  const profile = session && session.kind !== "player" ? profileFor(session) : demoProfile;
+  const [teamDraft, setTeamDraft] = useState<{ teamName: string; season: string } | null>(null);
+  const sessionKey = !session ? "none" : session.kind === "demo" ? "demo" : `${session.kind}:${session.email}`;
+  useEffect(() => {
+    setTeamDraft(null);
+  }, [sessionKey]);
+  const loadedProfile = session && session.kind !== "player" ? profileFor(session) : demoProfile;
+  const profile = teamDraft ? { ...loadedProfile, ...teamDraft } : loadedProfile;
   const teamCode = session && session.kind !== "player" ? teamCodeFor(session) : demoTeamCode;
   const playerTeamCode = session?.kind === "player" ? loadPlayerAccounts().find((account) => account.email === session.email)?.teamCode : undefined;
   const themeCode = screen === "coach" ? teamCode : screen === "player" ? playerTeamCode : undefined;
@@ -2981,7 +3432,17 @@ export default function App() {
       </main>
       {dialog?.type === "settings" && (
         <Modal title="Settings" onClose={closeDialog}>
-          <SettingsPanel profile={profile} teamCode={teamCode} theme={theme} onTheme={chooseTheme} onClose={closeDialog} />
+          <SettingsPanel
+            profile={profile}
+            teamCode={teamCode}
+            theme={theme}
+            onTheme={chooseTheme}
+            onSaveTeam={(details) => {
+              if (session && session.kind !== "player") saveTeamDetails(session, details);
+              setTeamDraft(details);
+            }}
+            onClose={closeDialog}
+          />
         </Modal>
       )}
       {dialog?.type === "scout-form" && (

@@ -290,36 +290,79 @@ button.diagram { width: 100%; display: block; border: 0; color: inherit; cursor:
 .backdrop { display: none; }
 
 .gate { min-height: 100vh; background: var(--dark); color: #f4f7ef; padding: 28px 7vw 64px; }
-.gate-nav { display: flex; align-items: center; justify-content: space-between; }
-.gate-signin { height: 40px; padding: 0 16px; border-radius: 9px; border: 1px solid var(--dark-line); background: transparent; color: #f4f7ef; font-size: 13px; font-weight: 600; }
-.gate-signin:hover { border-color: var(--accent); color: var(--accent); }
-.gate-hero { max-width: 640px; padding: 72px 0 36px; }
-.gate-hero h2 { margin: 0 0 14px; font: 800 52px/1.05 "Manrope"; letter-spacing: -1.6px; }
-.gate-hero p:not(.eyebrow) { margin: 0; max-width: 460px; color: #a3ada4; font-size: 16px; line-height: 1.5; }
-.role-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 340px)); gap: 16px; }
-.role-card {
-  text-align: left; padding: 22px; border-radius: 16px; border: 1px solid var(--dark-line); background: var(--dark-2);
-  color: inherit; display: grid; gap: 8px; transition: border-color .2s ease, transform .2s ease;
+.gate-home {
+  display: grid; place-items: center; padding: 48px 24px; position: relative; overflow: hidden; text-align: center;
 }
-.role-card:hover { border-color: var(--accent-mid); transform: translateY(-2px); }
+.gate-home::before, .gate-home::after {
+  content: ""; position: absolute; left: 50%; border-radius: 50%; pointer-events: none;
+}
+.gate-home::before {
+  width: 560px; height: 560px; top: 46%; transform: translate(-50%, -58%);
+  border: 1px solid color-mix(in srgb, var(--accent) 28%, transparent);
+  box-shadow: 0 0 0 78px color-mix(in srgb, var(--accent) 5%, transparent), 0 0 0 168px color-mix(in srgb, var(--accent) 3%, transparent);
+}
+.gate-home::after {
+  width: 9px; height: 9px; top: 9%; transform: translateX(-50%); background: var(--accent);
+  box-shadow: 190px 70px 0 -2px color-mix(in srgb, var(--accent) 55%, transparent), -220px 120px 0 -2px color-mix(in srgb, var(--accent) 40%, transparent);
+}
+.gate-stage { position: relative; z-index: 1; width: min(760px, 100%); display: grid; justify-items: center; }
+.gate-home .logo { margin-bottom: 28px; }
+.gate-home .eyebrow { margin-bottom: 14px; }
+.gate-home h2 { margin: 0 0 16px; max-width: 640px; font: 800 64px/0.98 "Manrope"; letter-spacing: -2.2px; }
+.gate-home .gate-stage > p:not(.eyebrow) { margin: 0 0 36px; max-width: 460px; color: #a3ada4; font-size: 17px; line-height: 1.55; }
+.role-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 340px)); gap: 16px; width: 100%; }
+.role-card {
+  text-align: left; padding: 22px; border-radius: 16px; border: 1px solid var(--dark-line); background: color-mix(in srgb, var(--dark-2) 88%, transparent);
+  color: inherit; display: grid; gap: 8px; transition: border-color .2s ease, transform .2s ease, background .2s ease;
+  backdrop-filter: blur(8px);
+}
+.gate-home .role-card { text-align: center; justify-items: center; padding: 28px 22px 22px; }
+.gate-home .role-card em { justify-content: center; }
+.role-card:hover { border-color: var(--accent); transform: translateY(-3px); background: color-mix(in srgb, var(--accent) 8%, var(--dark-2)); }
 .role-card strong { font: 700 20px "Manrope"; }
 .role-card > span:last-of-type { color: #9aa49b; font-size: 13px; line-height: 1.45; }
 .role-card em { margin-top: 8px; font-style: normal; font-size: 13px; font-weight: 600; color: var(--accent); display: inline-flex; align-items: center; gap: 4px; }
 .role-card.is-next em { color: #c5cdc6; }
 .role-icon { width: 42px; height: 42px; border-radius: 12px; display: grid; place-items: center; background: var(--accent-dim); color: var(--accent); margin-bottom: 6px; }
 .role-icon.muted { background: var(--dark-3); color: #c5cdc6; }
-.login-gate { display: grid; align-content: start; justify-items: start; gap: 18px; padding-top: 28px; padding-bottom: 48px; }
-.login-card select { width: 100%; height: 42px; border-radius: 9px; border: 1px solid var(--dark-line); background: var(--dark); color: white; padding: 0 12px; }
-.back-link { border: 0; background: transparent; color: #c5cdc6; display: inline-flex; align-items: center; gap: 6px; padding: 0; font-size: 13px; }
-.login-card { width: min(420px, 100%); background: var(--dark-2); border: 1px solid var(--dark-line); border-radius: 18px; padding: 28px; display: grid; gap: 8px; }
-.login-card h2 { margin: 0; font: 800 32px "Manrope"; letter-spacing: -.8px; }
-.login-card > p:not(.eyebrow):not(.form-error) { margin: 0 0 8px; color: #9aa49b; font-size: 13px; line-height: 1.5; }
-.login-card label { display: grid; gap: 6px; font-size: 12px; color: #c5cdc6; margin-top: 6px; }
-.login-card input { height: 42px; border-radius: 9px; border: 1px solid var(--dark-line); background: var(--dark); color: white; padding: 0 12px; }
-.login-card input:focus { outline: 2px solid var(--accent-mid); border-color: transparent; }
-.form-error { margin: 4px 0 0; color: #ffb4a8; font-size: 12px; }
-.login-submit { width: 100%; height: 44px; margin-top: 10px; }
-.demo-link { justify-content: center; width: 100%; color: #c5cdc6; margin-top: 4px; }
+.login-gate {
+  display: flex; flex-direction: column; align-items: center;
+  position: relative; overflow: auto; padding: 88px 24px 64px;
+}
+.login-gate::before {
+  content: ""; position: absolute; left: 50%; top: 42%; width: 520px; height: 520px; border-radius: 50%;
+  transform: translate(-50%, -50%); pointer-events: none;
+  border: 1px solid color-mix(in srgb, var(--accent) 24%, transparent);
+  box-shadow: 0 0 0 72px color-mix(in srgb, var(--accent) 5%, transparent), 0 0 0 150px color-mix(in srgb, var(--accent) 3%, transparent);
+}
+.login-card select { width: 100%; height: 46px; border-radius: 10px; border: 1px solid var(--dark-line); background: var(--dark); color: white; padding: 0 14px; }
+.back-link {
+  position: absolute; top: 22px; left: 22px; z-index: 2; height: 38px; padding: 0 14px;
+  border: 1px solid var(--dark-line); border-radius: 999px; background: color-mix(in srgb, var(--dark) 70%, transparent);
+  color: #e7ece7; display: inline-flex; align-items: center; gap: 6px; font-size: 13px; font-weight: 600;
+}
+.back-link:hover { border-color: var(--accent); color: var(--accent); }
+.login-card {
+  position: relative; z-index: 1; width: min(440px, 100%); margin-top: auto; margin-bottom: auto;
+  background: color-mix(in srgb, var(--dark-2) 94%, transparent); border: 1px solid var(--dark-line);
+  border-radius: 22px; padding: 32px 28px 22px; display: grid; justify-items: center; gap: 6px;
+  box-shadow: 0 24px 60px #00000040; backdrop-filter: blur(8px);
+}
+.login-card .logo { margin-bottom: 8px; }
+.login-card .eyebrow { color: var(--accent); margin-bottom: 8px; }
+.login-card h2 { margin: 0; font: 800 36px/1 "Manrope"; letter-spacing: -1px; text-align: center; }
+.login-card > p:not(.eyebrow):not(.form-error) { margin: 0 0 10px; max-width: 340px; color: #a3ada4; font-size: 14px; line-height: 1.5; text-align: center; }
+.login-card label, .login-card .field-row { width: 100%; text-align: left; }
+.login-card label { display: grid; gap: 6px; font-size: 12px; font-weight: 600; color: #c5cdc6; margin-top: 8px; }
+.login-card input { height: 46px; border-radius: 10px; border: 1px solid var(--dark-line); background: var(--dark); color: white; padding: 0 14px; }
+.login-card input::placeholder { color: #6d776e; }
+.login-card input:focus, .login-card select:focus { outline: 2px solid var(--accent); border-color: transparent; }
+.form-error { margin: 4px 0 0; width: 100%; color: #ffb4a8; font-size: 13px; text-align: left; }
+.primary-button.login-submit { width: 100%; height: 46px; margin-top: 16px; background: var(--accent); color: var(--accent-ink); }
+.primary-button.login-submit:hover { background: color-mix(in srgb, var(--accent) 86%, white); }
+.demo-link { justify-content: center; width: 100%; color: #c5cdc6; margin-top: 2px; border-radius: 8px; }
+.demo-link:hover { color: white; }
+.login-card .demo-link:first-of-type { margin-top: 8px; padding-top: 10px; }
 .coming-list { margin: 8px 0 12px; padding-left: 18px; color: #c5cdc6; font-size: 13px; display: grid; gap: 6px; }
 
 .notice-wrap { position: relative; }
@@ -352,6 +395,15 @@ button.diagram { width: 100%; display: block; border: 0; color: inherit; cursor:
 .box-score tfoot td { background: #f6f7f3; font-weight: 700; border-top: 1px solid var(--line); border-bottom: 0; }
 .box-score tfoot .player-col { background: #f6f7f3; }
 .box-score .is-dnp td { color: #a2a9a3; }
+.box-score tr.is-me td, .box-score tr.is-me .player-col { background: var(--accent-soft); }
+.availability { height: 36px; padding: 0 12px; border-radius: 9px; display: inline-flex; align-items: center; font-size: 12px; font-weight: 700; white-space: nowrap; }
+.availability.is-in { background: var(--accent-soft); color: var(--accent-deep); }
+.availability.is-out { background: #f3f4ef; color: #6b746c; }
+.availability.is-open { background: #fff7ec; color: #8a520f; }
+.your-line { font-style: normal; color: #5f685f; font-size: 12px; font-weight: 700; }
+.team-switcher.is-static { cursor: default; }
+.player-row.is-you { background: var(--accent-soft); }
+.roster-table.is-public .table-head, .roster-table.is-public .player-row { grid-template-columns: 2fr .6fr .8fr; }
 .dnp-cell { text-align: left !important; font-style: italic; }
 .jersey { display: inline-grid; place-items: center; min-width: 26px; height: 22px; margin-right: 9px; padding: 0 5px; border-radius: 6px; background: var(--dark); color: var(--accent); font: 800 11px "Manrope"; }
 .modal .box-score.is-entry input:not([type="checkbox"]) { width: 46px; padding: 6px 4px; text-align: center; border-radius: 7px; }
@@ -412,9 +464,14 @@ button.diagram { width: 100%; display: block; border: 0; color: inherit; cursor:
 
 @media (max-width: 700px) {
   .gate { padding: 20px 18px 48px; }
-  .gate-hero { padding: 48px 0 28px; }
-  .gate-hero h2 { font-size: 36px; }
+  .gate-home { padding: 32px 18px; }
+  .gate-home h2 { font-size: 40px; }
+  .gate-home::before { width: 380px; height: 380px; }
+  .gate-home::after { display: none; }
   .role-grid { grid-template-columns: 1fr; }
+  .login-gate { padding: 76px 16px 32px; justify-content: flex-start; }
+  .login-card { margin: 0; }
+  .back-link { top: 14px; left: 14px; }
 }
 
 @media (max-width: 1100px) {
