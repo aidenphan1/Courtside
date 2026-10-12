@@ -1,5 +1,27 @@
 import { FormEvent, PointerEvent as ReactPointerEvent, ReactNode, useEffect, useRef, useState } from "react";
 import {
+  accountReady,
+  accountRole,
+  authMessage,
+  changePassword,
+  fetchWorkspace,
+  registerCoach,
+  registerPlayer,
+  saveEvents,
+  saveMyProfile,
+  savePlays,
+  savePlayers,
+  saveScouting,
+  saveTeamRemote,
+  saveThemeRemote,
+  sendRecovery,
+  signIn,
+  signOutAccount,
+  signedInUser,
+  startAuth,
+  type RemoteWorkspace,
+} from "./remote";
+import {
   ArrowLeft,
   BarChart3,
   Bell,
@@ -203,7 +225,6 @@ function loadSession(): CoachSession | null {
   try {
     const parsed = JSON.parse(sessionStorage.getItem("courtside.session") ?? "null") as CoachSession | null;
     if (parsed?.kind === "demo") return { kind: "demo" };
-    if ((parsed?.kind === "coach" || parsed?.kind === "player") && typeof parsed.email === "string") return parsed;
   } catch {
     return null;
   }
@@ -274,18 +295,6 @@ function teamCodeFor(session: WorkspaceSession) {
   return session.kind === "demo" ? demoTeamCode : ensureTeamCode(session.email);
 }
 
-function teamByCode(code: string) {
-  const normalized = code.trim().toUpperCase();
-  if (normalized === demoTeamCode) {
-    const details = demoDetails();
-    return { code: demoTeamCode, name: details.teamName, coach: demoProfile.name, season: details.season, eventsKey: "courtside.events", playsKey: "courtside.plays", playersKey: "courtside.players" };
-  }
-  const account = loadAccounts().find((item) => item.teamCode === normalized);
-  if (!account) return null;
-  const prefix = `courtside.${encodeURIComponent(account.email)}`;
-  return { code: normalized, name: account.teamName, coach: account.name, season: account.season, eventsKey: `${prefix}.events`, playsKey: `${prefix}.plays`, playersKey: `${prefix}.players` };
-}
-
 function mergeRoster(teamCode: string, existing: Player[]) {
   const joined = loadPlayerAccounts().filter((account) => account.teamCode === teamCode);
   const linked = joined.map((account) => {
@@ -309,16 +318,6 @@ function mergeRoster(teamCode: string, existing: Player[]) {
 
 function jerseyTaken(players: Player[], number: string, isSelf: (player: Player) => boolean) {
   return players.find((player) => !isSelf(player) && player.number !== "" && Number(player.number) === Number(number));
-}
-
-function teamRoster(teamCode: string) {
-  const team = teamByCode(teamCode);
-  return team ? mergeRoster(team.code, loadList<Player>(team.playersKey)) : [];
-}
-
-async function hashPassword(password: string) {
-  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(password));
-  return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
 function initials(name: string) {
@@ -2005,7 +2004,7 @@ function SettingsPanel({
   teamCode: string;
   theme: Theme;
   onTheme: (theme: Theme) => void;
-  onSaveTeam: (details: { teamName: string; season: string }) => void;
+  onSaveTeam: (details: { teamName: string; season: string }) => void | Promise<void>;
   onClose: () => void;
 }) {
   const [teamName, setTeamName] = useState(profile.teamName);
@@ -2013,7 +2012,7 @@ function SettingsPanel({
   const [error, setError] = useState("");
   const [saved, setSaved] = useState(false);
 
-  function saveDetails(event: FormEvent) {
+  async function saveDetails(event: FormEvent) {
     event.preventDefault();
     if (!teamName.trim()) {
       setError("Enter the team name.");
@@ -2025,9 +2024,14 @@ function SettingsPanel({
       setSaved(false);
       return;
     }
-    onSaveTeam({ teamName: teamName.trim(), season });
-    setError("");
-    setSaved(true);
+    try {
+      await onSaveTeam({ teamName: teamName.trim(), season });
+      setError("");
+      setSaved(true);
+    } catch (caught) {
+      setSaved(false);
+      setError(caught instanceof Error ? caught.message : "The team details could not be saved.");
+    }
   }
 
   return (
@@ -2045,7 +2049,7 @@ function SettingsPanel({
       <section>
         <p className="eyebrow">Team details</p>
         <p className="field-hint">Fix a spelling mistake here. The team code stays the same, so players who already joined stay on the roster.</p>
-        <form onSubmit={saveDetails}>
+        <form onSubmit={(event) => { void saveDetails(event); }}>
           <label>Team name<input value={teamName} onChange={(event) => { setTeamName(event.target.value); setSaved(false); }} placeholder="Northside Ravens" /></label>
           <label>Season<input inputMode="numeric" value={season} onChange={(event) => { setSeason(digits(event.target.value, 4)); setSaved(false); }} placeholder="2026" /></label>
           {error && <p className="field-error">{error}</p>}
@@ -2371,7 +2375,7 @@ function ScoutingPage({
   );
 }
 
-type Screen = "home" | "coach-login" | "coach-register" | "coach" | "player-login" | "player-register" | "player";
+type Screen = "home" | "coach-login" | "coach-register" | "coach" | "player-login" | "player-register" | "player" | "reset";
 
 function HomeScreen({ onCoach, onPlayer }: { onCoach: () => void; onPlayer: () => void }) {
   return (
@@ -2409,29 +2413,51 @@ function CoachLogin({
   onBack: () => void;
   onRegister: () => void;
   onDemo: () => void;
-  onEnter: (email: string) => void;
+  onEnter: (email: string) => Promise<void>;
 }) {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
+  const [busy, setBusy] = useState(false);
 
   async function submit(event: FormEvent) {
     event.preventDefault();
-    const normalized = email.trim().toLowerCase();
-    if (loadPlayerAccounts().some((item) => item.email === normalized)) {
-      setError("That email is a player account. Sign in from I’m a player.");
+    setError("");
+    setNotice("");
+    setBusy(true);
+    try {
+      const user = await signIn(email, password);
+      if (accountRole(user) === "player") {
+        await signOutAccount();
+        setError("That email is a player account. Sign in from I’m a player.");
+        return;
+      }
+      if (accountRole(user) !== "coach") {
+        setError("Confirm your email first, then sign in.");
+        return;
+      }
+      await onEnter(user.email ?? email.trim().toLowerCase());
+    } catch (caught) {
+      setError(authMessage(caught, "Could not sign in."));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function recover() {
+    setError("");
+    setNotice("");
+    if (!email.includes("@")) {
+      setError("Enter your email first, then ask for the reset link.");
       return;
     }
-    const account = loadAccounts().find((item) => item.email === normalized);
-    if (!account) {
-      setError("No coach account uses that email. Create one to continue.");
-      return;
+    try {
+      await sendRecovery(email);
+      setNotice("Check your email for a link to choose a new password.");
+    } catch (caught) {
+      setError(authMessage(caught, "The reset email could not be sent."));
     }
-    if (account.passwordHash !== await hashPassword(password)) {
-      setError("That password doesn’t match this account.");
-      return;
-    }
-    onEnter(account.email);
   }
 
   return (
@@ -2463,7 +2489,9 @@ function CoachLogin({
           />
         </label>
         {error && <p className="form-error">{error}</p>}
-        <button className="primary-button login-submit" type="submit">Enter workspace</button>
+        {notice && <p className="form-note">{notice}</p>}
+        <button className="primary-button login-submit" type="submit" disabled={busy}>{busy ? "Signing in…" : "Enter workspace"}</button>
+        <button className="text-button demo-link" type="button" onClick={() => { void recover(); }}>Forgot password?</button>
         <button className="text-button demo-link" type="button" onClick={onRegister}>Create a coach account</button>
         <button className="text-button demo-link" type="button" onClick={onDemo}>Use the demo coach account</button>
       </form>
@@ -2471,7 +2499,7 @@ function CoachLogin({
   );
 }
 
-function CoachRegister({ onBack, onSignIn, onCreated }: { onBack: () => void; onSignIn: () => void; onCreated: (email: string) => void }) {
+function CoachRegister({ onBack, onSignIn, onCreated }: { onBack: () => void; onSignIn: () => void; onCreated: (email: string) => Promise<void> }) {
   const [name, setName] = useState("");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -2479,10 +2507,14 @@ function CoachRegister({ onBack, onSignIn, onCreated }: { onBack: () => void; on
   const [teamName, setTeamName] = useState("");
   const [season, setSeason] = useState("2026");
   const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
+  const [busy, setBusy] = useState(false);
 
   async function submit(event: FormEvent) {
     event.preventDefault();
     const normalized = email.trim().toLowerCase();
+    setError("");
+    setNotice("");
     if (!name.trim() || !teamName.trim()) {
       setError("Enter your name and your team name.");
       return;
@@ -2503,21 +2535,19 @@ function CoachRegister({ onBack, onSignIn, onCreated }: { onBack: () => void; on
       setError("Enter the season as a four-digit year.");
       return;
     }
-    const accounts = loadAccounts();
-    if (accounts.some((account) => account.email === normalized) || loadPlayerAccounts().some((account) => account.email === normalized)) {
-      setError("An account already uses that email. Sign in instead.");
-      return;
+    setBusy(true);
+    try {
+      const user = await registerCoach({ name, email: normalized, password, teamName, season });
+      if (!accountReady(user)) {
+        setNotice("Check your email to confirm the account. Then sign in from any device.");
+        return;
+      }
+      await onCreated(user.email ?? normalized);
+    } catch (caught) {
+      setError(authMessage(caught, "The account could not be created."));
+    } finally {
+      setBusy(false);
     }
-    const account: CoachAccount = {
-      name: name.trim(),
-      email: normalized,
-      passwordHash: await hashPassword(password),
-      teamName: teamName.trim(),
-      season,
-      teamCode: makeTeamCode(teamName),
-    };
-    localStorage.setItem("courtside.accounts", JSON.stringify([...accounts, account]));
-    onCreated(account.email);
   }
 
   return (
@@ -2527,7 +2557,7 @@ function CoachRegister({ onBack, onSignIn, onCreated }: { onBack: () => void; on
         <Logo />
         <p className="eyebrow">Coach workspace</p>
         <h2>Create your team</h2>
-        <p>This account stays in this browser. You’ll land in an empty workspace for your team.</p>
+        <p>Your team is saved online. Confirm the email, then sign in from any device.</p>
         <label>Your name<input value={name} onChange={(event) => setName(event.target.value)} placeholder="Alex Carter" autoComplete="name" /></label>
         <label>Email<input type="email" value={email} onChange={(event) => setEmail(event.target.value)} placeholder="coach@school.edu" autoComplete="username" /></label>
         <label>Password<input type="password" value={password} onChange={(event) => setPassword(event.target.value)} placeholder="At least 6 characters" autoComplete="new-password" /></label>
@@ -2535,7 +2565,8 @@ function CoachRegister({ onBack, onSignIn, onCreated }: { onBack: () => void; on
         <label>Team name<input value={teamName} onChange={(event) => setTeamName(event.target.value)} placeholder="Northside Ravens" /></label>
         <label>Season<input value={season} onChange={(event) => setSeason(digits(event.target.value, 4))} inputMode="numeric" placeholder="2026" /></label>
         {error && <p className="form-error">{error}</p>}
-        <button className="primary-button login-submit" type="submit">Create account</button>
+        {notice && <p className="form-note">{notice}</p>}
+        <button className="primary-button login-submit" type="submit" disabled={busy}>{busy ? "Creating account…" : "Create account"}</button>
         <button className="text-button demo-link" type="button" onClick={onSignIn}>Already have an account? Sign in</button>
       </form>
     </div>
@@ -2549,29 +2580,51 @@ function PlayerLogin({
 }: {
   onBack: () => void;
   onRegister: () => void;
-  onEnter: (email: string) => void;
+  onEnter: (email: string) => Promise<void>;
 }) {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
+  const [busy, setBusy] = useState(false);
 
   async function submit(event: FormEvent) {
     event.preventDefault();
-    const normalized = email.trim().toLowerCase();
-    if (loadAccounts().some((item) => item.email === normalized)) {
-      setError("That email is a coach account. Sign in from I’m a coach.");
+    setError("");
+    setNotice("");
+    setBusy(true);
+    try {
+      const user = await signIn(email, password);
+      if (accountRole(user) === "coach") {
+        await signOutAccount();
+        setError("That email is a coach account. Sign in from I’m a coach.");
+        return;
+      }
+      if (accountRole(user) !== "player") {
+        setError("Confirm your email first, then sign in.");
+        return;
+      }
+      await onEnter(user.email ?? email.trim().toLowerCase());
+    } catch (caught) {
+      setError(authMessage(caught, "Could not sign in."));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function recover() {
+    setError("");
+    setNotice("");
+    if (!email.includes("@")) {
+      setError("Enter your email first, then ask for the reset link.");
       return;
     }
-    const account = loadPlayerAccounts().find((item) => item.email === normalized);
-    if (!account) {
-      setError("No player account uses that email. Create one to join your team.");
-      return;
+    try {
+      await sendRecovery(email);
+      setNotice("Check your email for a link to choose a new password.");
+    } catch (caught) {
+      setError(authMessage(caught, "The reset email could not be sent."));
     }
-    if (account.passwordHash !== await hashPassword(password)) {
-      setError("That password doesn’t match this account.");
-      return;
-    }
-    onEnter(account.email);
   }
 
   return (
@@ -2585,14 +2638,16 @@ function PlayerLogin({
         <label>Email<input type="email" autoComplete="username" placeholder="you@school.edu" value={email} onChange={(event) => setEmail(event.target.value)} /></label>
         <label>Password<input type="password" autoComplete="current-password" placeholder="••••••••" value={password} onChange={(event) => setPassword(event.target.value)} /></label>
         {error && <p className="form-error">{error}</p>}
-        <button className="primary-button login-submit" type="submit">Enter team</button>
+        {notice && <p className="form-note">{notice}</p>}
+        <button className="primary-button login-submit" type="submit" disabled={busy}>{busy ? "Signing in…" : "Enter team"}</button>
+        <button className="text-button demo-link" type="button" onClick={() => { void recover(); }}>Forgot password?</button>
         <button className="text-button demo-link" type="button" onClick={onRegister}>Create a player account</button>
       </form>
     </div>
   );
 }
 
-function PlayerRegister({ onBack, onSignIn, onCreated }: { onBack: () => void; onSignIn: () => void; onCreated: (email: string) => void }) {
+function PlayerRegister({ onBack, onSignIn, onCreated }: { onBack: () => void; onSignIn: () => void; onCreated: (email: string) => Promise<void> }) {
   const [name, setName] = useState("");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -2601,11 +2656,15 @@ function PlayerRegister({ onBack, onSignIn, onCreated }: { onBack: () => void; o
   const [position, setPosition] = useState<Position>("PG");
   const [teamCode, setTeamCode] = useState("");
   const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
+  const [busy, setBusy] = useState(false);
 
   async function submit(event: FormEvent) {
     event.preventDefault();
     const normalized = email.trim().toLowerCase();
     const code = teamCode.trim().toUpperCase();
+    setError("");
+    setNotice("");
     if (!name.trim() || !number.trim()) {
       setError("Enter your name and jersey number.");
       return;
@@ -2622,29 +2681,23 @@ function PlayerRegister({ onBack, onSignIn, onCreated }: { onBack: () => void; o
       setError("Those passwords don’t match.");
       return;
     }
-    if (!teamByCode(code)) {
-      setError("That team code doesn’t match a coach. Ask your coach for the code on their roster page.");
+    if (!code) {
+      setError("Enter the team code from your coach.");
       return;
     }
-    if (loadPlayerAccounts().some((account) => account.email === normalized) || loadAccounts().some((account) => account.email === normalized)) {
-      setError("An account already uses that email. Sign in instead.");
-      return;
+    setBusy(true);
+    try {
+      const user = await registerPlayer({ name, email: normalized, password, number, position, teamCode: code });
+      if (!accountReady(user)) {
+        setNotice("Check your email to confirm the account. Then sign in from any device.");
+        return;
+      }
+      await onCreated(user.email ?? normalized);
+    } catch (caught) {
+      setError(authMessage(caught, "The account could not be created."));
+    } finally {
+      setBusy(false);
     }
-    const taken = jerseyTaken(teamRoster(code), number, () => false);
-    if (taken) {
-      setError(`#${taken.number} is already taken on this team. Pick another jersey number.`);
-      return;
-    }
-    const account: PlayerAccount = {
-      name: name.trim(),
-      email: normalized,
-      passwordHash: await hashPassword(password),
-      teamCode: code,
-      number: number.trim(),
-      position,
-    };
-    localStorage.setItem("courtside.playerAccounts", JSON.stringify([...loadPlayerAccounts(), account]));
-    onCreated(account.email);
   }
 
   return (
@@ -2654,7 +2707,7 @@ function PlayerRegister({ onBack, onSignIn, onCreated }: { onBack: () => void; o
         <Logo />
         <p className="eyebrow">Player access</p>
         <h2>Join your team</h2>
-        <p>Use the team code from your coach. You’ll show up on their roster as soon as your account is created.</p>
+        <p>Use the team code from your coach. After you confirm your email, you’ll show up on the roster.</p>
         <label>Your name<input value={name} onChange={(event) => setName(event.target.value)} placeholder="Jordan Hale" autoComplete="name" /></label>
         <label>Email<input type="email" value={email} onChange={(event) => setEmail(event.target.value)} placeholder="you@school.edu" autoComplete="username" /></label>
         <label>Password<input type="password" value={password} onChange={(event) => setPassword(event.target.value)} placeholder="At least 6 characters" autoComplete="new-password" /></label>
@@ -2669,7 +2722,8 @@ function PlayerRegister({ onBack, onSignIn, onCreated }: { onBack: () => void; o
         </div>
         <label>Team code<input value={teamCode} onChange={(event) => setTeamCode(event.target.value.toUpperCase())} placeholder="RAVENS" autoCapitalize="characters" /></label>
         {error && <p className="form-error">{error}</p>}
-        <button className="primary-button login-submit" type="submit">Create account</button>
+        {notice && <p className="form-note">{notice}</p>}
+        <button className="primary-button login-submit" type="submit" disabled={busy}>{busy ? "Creating account…" : "Create account"}</button>
         <button className="text-button demo-link" type="button" onClick={onSignIn}>Already have an account? Sign in</button>
       </form>
     </div>
@@ -2703,35 +2757,35 @@ function playerAverages(events: ScheduleEvent[], playerId: string) {
   return { games: played.length, ppg: average(points), rpg: average((line) => line.reb), apg: average((line) => line.ast), spg: average((line) => line.stl) };
 }
 
-function savePlayerProfile(email: string, change: { name: string; number: string; position: Position }) {
-  const accounts = loadPlayerAccounts();
-  const account = accounts.find((item) => item.email === email);
-  if (!account) return;
-  account.name = change.name;
-  account.number = change.number;
-  account.position = change.position;
-  localStorage.setItem("courtside.playerAccounts", JSON.stringify(accounts));
-  const team = teamByCode(account.teamCode);
-  if (!team) return;
-  const roster = loadList<Player>(team.playersKey).map((player) => player.accountEmail === email ? { ...player, ...change } : player);
-  localStorage.setItem(team.playersKey, JSON.stringify(roster));
-}
-
 function PlayerHome({ email, onSignOut }: { email: string; onSignOut: () => void }) {
   const [page, setPage] = useState<PlayerPage>("Home");
   const [menuOpen, setMenuOpen] = useState(false);
   const [noticesOpen, setNoticesOpen] = useState(false);
   const [view, setView] = useState<null | { type: "play"; id: string } | { type: "report"; id: string } | { type: "profile" }>(null);
-  const [tick, setTick] = useState(0);
+  const [workspace, setWorkspace] = useState<RemoteWorkspace | null>(null);
+  const [loadError, setLoadError] = useState("");
   const noticeRef = useRef<HTMLDivElement>(null);
 
+  async function refresh() {
+    try {
+      const data = await fetchWorkspace();
+      if (data.role !== "player") throw new Error("This team view is for player accounts.");
+      setWorkspace(data);
+      setLoadError("");
+      applyTheme(data.theme);
+    } catch (error) {
+      setLoadError(error instanceof Error ? error.message : "Your team could not be loaded.");
+    }
+  }
+
   useEffect(() => {
-    const bump = () => setTick((value) => value + 1);
-    window.addEventListener("focus", bump);
-    window.addEventListener("storage", bump);
+    void refresh();
+    const timer = window.setInterval(() => { void refresh(); }, 15000);
+    const onFocus = () => { void refresh(); };
+    window.addEventListener("focus", onFocus);
     return () => {
-      window.removeEventListener("focus", bump);
-      window.removeEventListener("storage", bump);
+      window.clearInterval(timer);
+      window.removeEventListener("focus", onFocus);
     };
   }, []);
 
@@ -2744,15 +2798,32 @@ function PlayerHome({ email, onSignOut }: { email: string; onSignOut: () => void
     return () => document.removeEventListener("mousedown", close);
   }, [noticesOpen]);
 
-  const account = loadPlayerAccounts().find((item) => item.email === email);
-  if (!account) return null;
-  const team = teamByCode(account.teamCode);
-  const events = team ? loadList<ScheduleEvent>(team.eventsKey) : [];
-  const plays = team ? loadList<Play>(team.playsKey) : [];
-  const roster = team ? teamRoster(team.code) : [];
-  void tick;
+  if (!workspace) {
+    return (
+      <div className="gate login-gate">
+        <Logo />
+        <p className="eyebrow">Player access</p>
+        <h2>{loadError ? "Could not load your team" : "Loading your team…"}</h2>
+        {loadError && <p className="form-error">{loadError}</p>}
+        {loadError && <button className="primary-button login-submit" onClick={() => { void refresh(); }}>Try again</button>}
+        <button className="text-button demo-link" type="button" onClick={onSignOut}>Sign out</button>
+      </div>
+    );
+  }
 
-  const me = roster.find((player) => player.accountEmail === account.email);
+  const roster = workspace.players as Player[];
+  const events = workspace.events as ScheduleEvent[];
+  const plays = workspace.plays as Play[];
+  const me = roster.find((player) => player.accountEmail === email);
+  const account: PlayerAccount = {
+    name: me?.name ?? email,
+    email,
+    teamCode: workspace.teamCode,
+    number: me?.number ?? "",
+    position: me?.position ?? "PG",
+    passwordHash: "",
+  };
+  const team = { name: workspace.profile.teamName, coach: workspace.coachName, season: workspace.profile.season };
   const mine = me?.id ?? `acct:${account.email}`;
   const self = {
     id: mine,
@@ -3061,7 +3132,7 @@ function PlayerHome({ email, onSignOut }: { email: string; onSignOut: () => void
         </Modal>
       )}
       {view?.type === "profile" && (
-        <PlayerProfile account={account} onClose={() => setView(null)} onSaved={() => { setView(null); setTick((value) => value + 1); }} />
+        <PlayerProfile account={account} roster={roster} onClose={() => setView(null)} onSaved={() => { setView(null); void refresh(); }} />
       )}
     </div>
   );
@@ -3112,10 +3183,12 @@ function PlayerPlaybook({ plays, onOpen }: { plays: Play[]; onOpen: (id: string)
 
 function PlayerProfile({
   account,
+  roster,
   onClose,
   onSaved,
 }: {
   account: PlayerAccount;
+  roster: Player[];
   onClose: () => void;
   onSaved: () => void;
 }) {
@@ -3124,24 +3197,28 @@ function PlayerProfile({
   const [position, setPosition] = useState<Position>(account.position);
   const [error, setError] = useState("");
 
-  function submit(event: FormEvent) {
+  async function submit(event: FormEvent) {
     event.preventDefault();
     if (!name.trim() || !number.trim()) {
       setError("Enter your name and jersey number.");
       return;
     }
-    const taken = jerseyTaken(teamRoster(account.teamCode), number, (player) => player.accountEmail === account.email);
+    const taken = jerseyTaken(roster, number, (player) => player.accountEmail === account.email);
     if (taken) {
       setError(`#${taken.number} is already taken by ${taken.name}.`);
       return;
     }
-    savePlayerProfile(account.email, { name: name.trim(), number, position });
-    onSaved();
+    try {
+      await saveMyProfile({ name: name.trim(), number, position });
+      onSaved();
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Could not save your details.");
+    }
   }
 
   return (
     <Modal title="My details" onClose={onClose}>
-      <form onSubmit={submit}>
+      <form onSubmit={(event) => { void submit(event); }}>
         <p className="field-hint">Your coach sees this name and number on the roster. The team code stays {account.teamCode}.</p>
         <label>Name<input value={name} onChange={(event) => setName(event.target.value)} /></label>
         <div className="field-row">
@@ -3228,6 +3305,85 @@ function ReviewEditor({
   );
 }
 
+function useServerList<T>(value: T, enabled: boolean, skip: { current: boolean }, save: (value: T) => Promise<unknown>, setMessage: (message: string) => void) {
+  const latest = useRef(value);
+  latest.current = value;
+  const dirty = useRef(false);
+  useEffect(() => {
+    if (!enabled) return;
+    if (skip.current) {
+      skip.current = false;
+      dirty.current = false;
+      return;
+    }
+    dirty.current = true;
+    const timer = window.setTimeout(() => {
+      void save(latest.current).then(() => {
+        dirty.current = false;
+        setMessage("");
+      }).catch((error: unknown) => {
+        setMessage(error instanceof Error ? error.message : "Could not reach Courtside. Your latest change is still on this page.");
+      });
+    }, 450);
+    return () => window.clearTimeout(timer);
+  }, [enabled, save, setMessage, skip, value]);
+  useEffect(() => {
+    if (!enabled) return;
+    const timer = window.setInterval(() => {
+      if (!dirty.current) return;
+      void save(latest.current).then(() => {
+        dirty.current = false;
+        setMessage("");
+      }).catch(() => undefined);
+    }, 8000);
+    return () => window.clearInterval(timer);
+  }, [enabled, save, setMessage]);
+}
+
+function ResetPassword({ onDone }: { onDone: () => void }) {
+  const [password, setPassword] = useState("");
+  const [confirm, setConfirm] = useState("");
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  async function submit(event: FormEvent) {
+    event.preventDefault();
+    if (password.length < 6) {
+      setError("Use a password of at least 6 characters.");
+      return;
+    }
+    if (password !== confirm) {
+      setError("Those passwords don’t match.");
+      return;
+    }
+    setBusy(true);
+    try {
+      await changePassword(password);
+      await signOutAccount();
+      onDone();
+    } catch (caught) {
+      setError(authMessage(caught, "The password could not be updated."));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="gate login-gate">
+      <form className="login-card" onSubmit={(event) => { void submit(event); }}>
+        <Logo />
+        <p className="eyebrow">Account</p>
+        <h2>Choose a new password</h2>
+        <p>Use at least 6 characters. You’ll sign in again afterwards.</p>
+        <label>New password<input type="password" value={password} onChange={(event) => setPassword(event.target.value)} autoComplete="new-password" /></label>
+        <label>Confirm password<input type="password" value={confirm} onChange={(event) => setConfirm(event.target.value)} autoComplete="new-password" /></label>
+        {error && <p className="form-error">{error}</p>}
+        <button className="primary-button login-submit" type="submit" disabled={busy}>{busy ? "Saving…" : "Save password"}</button>
+      </form>
+    </div>
+  );
+}
+
 export default function App() {
   const [session, setSession] = useState<CoachSession | null>(() => loadSession());
   const [screen, setScreen] = useState<Screen>(() => {
@@ -3255,6 +3411,58 @@ export default function App() {
     return current && current.kind !== "player" ? loadList(dataKey(current, "scouting")) : [];
   });
   const [, setClock] = useState(0);
+  const [booting, setBooting] = useState(true);
+  const [syncError, setSyncError] = useState("");
+  const [coachProfile, setCoachProfile] = useState<CoachProfile | null>(null);
+  const [coachCode, setCoachCode] = useState("");
+  const skipEvents = useRef(false);
+  const skipPlays = useRef(false);
+  const skipPlayers = useRef(false);
+  const skipScouting = useRef(false);
+  const coachOnline = session?.kind === "coach";
+  useServerList(events, coachOnline, skipEvents, saveEvents, setSyncError);
+  useServerList(plays, coachOnline, skipPlays, savePlays, setSyncError);
+  useServerList(players, coachOnline, skipPlayers, savePlayers, setSyncError);
+  useServerList(scouting, coachOnline, skipScouting, saveScouting, setSyncError);
+
+  function showWorkspace(data: RemoteWorkspace) {
+    skipEvents.current = true;
+    skipPlays.current = true;
+    skipPlayers.current = true;
+    skipScouting.current = true;
+    setEvents(data.events as ScheduleEvent[]);
+    setPlays(data.plays as Play[]);
+    setPlayers(data.players as Player[]);
+    setScouting(data.scouting as ScoutReport[]);
+    setCoachProfile({ name: data.profile.name, teamName: data.profile.teamName, season: data.profile.season, demo: false });
+    setCoachCode(data.teamCode);
+    setTheme(data.theme);
+  }
+
+  async function openCoach(email: string) {
+    const data = await fetchWorkspace();
+    if (data.role !== "coach") {
+      await signOutAccount();
+      throw new Error("That email is a player account. Sign in from I’m a player.");
+    }
+    showWorkspace(data);
+    setSession({ kind: "coach", email });
+    sessionStorage.removeItem("courtside.session");
+    setPage("Overview");
+    setScreen("coach");
+  }
+
+  async function enterPlayer(email: string) {
+    const data = await fetchWorkspace();
+    if (data.role !== "player") {
+      await signOutAccount();
+      throw new Error("That email is a coach account. Sign in from I’m a coach.");
+    }
+    setTheme(data.theme);
+    setSession({ kind: "player", email });
+    sessionStorage.removeItem("courtside.session");
+    setScreen("player");
+  }
 
   useEffect(() => {
     const timer = window.setInterval(() => setClock((value) => value + 1), 60_000);
@@ -3262,24 +3470,48 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    if (!session || session.kind === "player") return;
+    let cancel = false;
+    void (async () => {
+      try {
+        const callback = await startAuth();
+        if (cancel) return;
+        if (callback?.type === "recovery") {
+          setScreen("reset");
+          return;
+        }
+        const user = callback?.user ?? await signedInUser();
+        if (!user?.email || cancel) return;
+        const role = accountRole(user);
+        if (role === "player") await enterPlayer(user.email);
+        else if (role === "coach") await openCoach(user.email);
+      } catch {
+        /* Identity is only available on the published Netlify site. */
+      } finally {
+        if (!cancel) setBooting(false);
+      }
+    })();
+    return () => { cancel = true; };
+  }, []);
+
+  useEffect(() => {
+    if (session?.kind !== "demo") return;
     localStorage.setItem(dataKey(session, "scouting"), JSON.stringify(scouting));
   }, [scouting, session]);
 
   useEffect(() => {
-    if (!session || session.kind === "player") return;
+    if (session?.kind !== "demo") return;
     localStorage.setItem(dataKey(session, "events"), JSON.stringify(events));
   }, [events, session]);
   useEffect(() => {
-    if (!session || session.kind === "player") return;
+    if (session?.kind !== "demo") return;
     localStorage.setItem(dataKey(session, "plays"), JSON.stringify(plays));
   }, [plays, session]);
   useEffect(() => {
-    if (!session || session.kind === "player") return;
+    if (session?.kind !== "demo") return;
     localStorage.setItem(dataKey(session, "players"), JSON.stringify(players));
   }, [players, session]);
   useEffect(() => {
-    if (!session || session.kind === "player") return;
+    if (session?.kind !== "demo") return;
     const code = teamCodeFor(session);
     const apply = () => setPlayers((current) => mergeRoster(code, current));
     apply();
@@ -3290,6 +3522,16 @@ export default function App() {
       window.removeEventListener("focus", apply);
     };
   }, [session]);
+
+  useEffect(() => {
+    if (session?.kind !== "coach" || dialog || syncError) return;
+    const timer = window.setInterval(() => {
+      void fetchWorkspace().then((data) => {
+        if (data.role === "coach") showWorkspace(data);
+      }).catch(() => undefined);
+    }, 15000);
+    return () => window.clearInterval(timer);
+  }, [dialog, session, syncError]);
 
   function enter(next: WorkspaceSession) {
     setEvents(loadList(dataKey(next, "events")));
@@ -3302,19 +3544,17 @@ export default function App() {
     setScreen("coach");
   }
 
-  function enterPlayer(email: string) {
-    setSession({ kind: "player", email });
-    sessionStorage.setItem("courtside.session", JSON.stringify({ kind: "player", email }));
-    setScreen("player");
-  }
-
-  function signOut() {
+  async function signOut() {
     setMenuOpen(false);
     setDialog(null);
     setSession(null);
+    setCoachProfile(null);
+    setSyncError("");
     sessionStorage.removeItem("courtside.session");
     setPage("Overview");
     setScreen("home");
+    setTheme(themes[0]);
+    await signOutAccount();
   }
 
   const [teamDraft, setTeamDraft] = useState<{ teamName: string; season: string } | null>(null);
@@ -3322,16 +3562,19 @@ export default function App() {
   useEffect(() => {
     setTeamDraft(null);
   }, [sessionKey]);
-  const loadedProfile = session && session.kind !== "player" ? profileFor(session) : demoProfile;
+  const loadedProfile = session?.kind === "coach"
+    ? (coachProfile ?? { ...demoProfile, demo: false })
+    : session?.kind === "demo"
+      ? profileFor(session)
+      : demoProfile;
   const profile = teamDraft ? { ...loadedProfile, ...teamDraft } : loadedProfile;
-  const teamCode = session && session.kind !== "player" ? teamCodeFor(session) : demoTeamCode;
-  const playerTeamCode = session?.kind === "player" ? loadPlayerAccounts().find((account) => account.email === session.email)?.teamCode : undefined;
-  const themeCode = screen === "coach" ? teamCode : screen === "player" ? playerTeamCode : undefined;
-  const [theme, setTheme] = useState<Theme>(() => themeCode ? loadTheme(themeCode) : themes[0]);
+  const teamCode = session?.kind === "coach" ? coachCode : demoTeamCode;
+  const [theme, setTheme] = useState<Theme>(() => loadSession()?.kind === "demo" ? loadTheme(demoTeamCode) : themes[0]);
 
   useEffect(() => {
-    setTheme(themeCode ? loadTheme(themeCode) : themes[0]);
-  }, [themeCode]);
+    if (session?.kind === "coach" || session?.kind === "player") return;
+    setTheme(session?.kind === "demo" ? loadTheme(demoTeamCode) : themes[0]);
+  }, [session]);
 
   useEffect(() => {
     applyTheme(theme);
@@ -3339,7 +3582,12 @@ export default function App() {
 
   function chooseTheme(next: Theme) {
     setTheme(next);
-    localStorage.setItem(themeKey(teamCode), JSON.stringify(next));
+    if (session?.kind === "demo") localStorage.setItem(themeKey(demoTeamCode), JSON.stringify(next));
+    if (session?.kind === "coach") {
+      void saveThemeRemote(next).catch((error: unknown) => {
+        setSyncError(error instanceof Error ? error.message : "The team colour could not be saved.");
+      });
+    }
   }
 
   const tasks = buildTasks(events, players, scouting, {
@@ -3394,6 +3642,8 @@ export default function App() {
   const openPlay = plays.find((play) => dialog?.type === "play" && play.id === dialog.id);
   const openPlayer = players.find((player) => dialog?.type === "player" && player.id === dialog.id);
 
+  if (booting) return <div className="gate login-gate"><Logo /><p className="eyebrow">Courtside</p><h2>Loading…</h2></div>;
+  if (screen === "reset") return <ResetPassword onDone={() => setScreen("coach-login")} />;
   if (screen === "home") return <HomeScreen onCoach={() => setScreen("coach-login")} onPlayer={() => setScreen("player-login")} />;
   if (screen === "coach-login") {
     return (
@@ -3401,7 +3651,7 @@ export default function App() {
         onBack={() => setScreen("home")}
         onRegister={() => setScreen("coach-register")}
         onDemo={() => enter({ kind: "demo" })}
-        onEnter={(email) => enter({ kind: "coach", email })}
+        onEnter={openCoach}
       />
     );
   }
@@ -3410,7 +3660,7 @@ export default function App() {
       <CoachRegister
         onBack={() => setScreen("home")}
         onSignIn={() => setScreen("coach-login")}
-        onCreated={(email) => enter({ kind: "coach", email })}
+        onCreated={openCoach}
       />
     );
   }
@@ -3439,6 +3689,7 @@ export default function App() {
       <main>
         <Header page={page} profile={profile} tasks={tasks} onMenu={() => setMenuOpen(true)} />
         <div className="content">
+          {syncError && <p className="inline-alert is-static"><span>{syncError}</span></p>}
           {page === "Overview" && <Overview events={events} plays={plays} players={players} profile={profile} tasks={tasks} scouting={scouting} setPage={setPage} onAdd={addKind} onOpenEvent={(id) => { setPage("Schedule"); setDialog({ type: "event", id }); }} onOpenReport={(id) => setDialog({ type: "report", id })} />}
           {page === "Schedule" && <SchedulePage events={events} players={players} onAdd={() => setDialog({ type: "event-form" })} onOpen={(id) => setDialog({ type: "event", id })} onResults={() => setPage("Results")} />}
           {page === "Results" && <ResultsPage events={events} teamName={profile.teamName} onOpen={(id) => setDialog({ type: "report", id })} onReport={(id) => setDialog({ type: "report-form", id })} />}
@@ -3462,8 +3713,12 @@ export default function App() {
             teamCode={teamCode}
             theme={theme}
             onTheme={chooseTheme}
-            onSaveTeam={(details) => {
-              if (session && session.kind !== "player") saveTeamDetails(session, details);
+            onSaveTeam={async (details) => {
+              if (session?.kind === "demo") saveTeamDetails(session, details);
+              if (session?.kind === "coach") {
+                await saveTeamRemote(details);
+                setCoachProfile((current) => current ? { ...current, teamName: details.teamName, season: details.season } : current);
+              }
               setTeamDraft(details);
             }}
             onClose={closeDialog}
