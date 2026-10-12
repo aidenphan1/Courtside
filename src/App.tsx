@@ -1,17 +1,4 @@
 import { FormEvent, PointerEvent as ReactPointerEvent, ReactNode, useEffect, useRef, useState } from "react";
-
-// One-time wipe of the practice data entered while checking the site.
-const freshStart = "courtside.fresh-start";
-if (localStorage.getItem(freshStart) !== "2") {
-  localStorage.setItem(freshStart, "2");
-  window.setTimeout(() => {
-    for (const key of Object.keys(localStorage)) {
-      if (key.startsWith("courtside.") && key !== freshStart) localStorage.removeItem(key);
-    }
-    sessionStorage.removeItem("courtside.session");
-    location.reload();
-  }, 50);
-}
 import {
   ArrowLeft,
   BarChart3,
@@ -318,6 +305,15 @@ function mergeRoster(teamCode: string, existing: Player[]) {
   const next = [...linked, ...manual];
   const signature = (list: Player[]) => JSON.stringify(list.map((player) => [player.id, player.accountEmail ?? "", player.name, player.number, player.position, player.status, player.rating, player.review]));
   return signature(next) === signature(existing) ? existing : next;
+}
+
+function jerseyTaken(players: Player[], number: string, isSelf: (player: Player) => boolean) {
+  return players.find((player) => !isSelf(player) && player.number !== "" && Number(player.number) === Number(number));
+}
+
+function teamRoster(teamCode: string) {
+  const team = teamByCode(teamCode);
+  return team ? mergeRoster(team.code, loadList<Player>(team.playersKey)) : [];
 }
 
 async function hashPassword(password: string) {
@@ -832,7 +828,7 @@ function Overview({
         <div>
           <p className="eyebrow light">{today}</p>
           <h2>{greeting()}, Coach {profile.name.split(" ").slice(-1)[0]}.</h2>
-          <p>{thisWeek === 0 ? "Nothing on the calendar this week yet." : `${thisWeek} event${thisWeek === 1 ? "" : "s"} in the next 7 days.`} {tasks.length ? `${tasks.length} item${tasks.length === 1 ? "" : "s"} need your attention.` : "You’re all caught up."}</p>
+          <p>{thisWeek === 0 ? "Nothing on the calendar this week yet." : `${thisWeek} event${thisWeek === 1 ? "" : "s"} in the next 7 days.`} {tasks.length ? `${tasks.length} item${tasks.length === 1 ? " needs" : "s need"} your attention.` : "You’re all caught up."}</p>
         </div>
         <div className="hero-record">
           <div><span>Record</span><strong>{record.games ? record.label : "0–0"}</strong></div>
@@ -1617,7 +1613,7 @@ function PlayForm({ initial, onCancel, onSave }: { initial?: Play; onCancel: () 
   );
 }
 
-function PlayerForm({ initial, onCancel, onSave }: { initial?: Player; onCancel: () => void; onSave: (player: Player) => void }) {
+function PlayerForm({ initial, players, onCancel, onSave }: { initial?: Player; players: Player[]; onCancel: () => void; onSave: (player: Player) => void }) {
   const [name, setName] = useState(initial?.name ?? "");
   const [number, setNumber] = useState(initial?.number ?? "");
   const [position, setPosition] = useState<Position>(initial?.position ?? "PG");
@@ -1628,6 +1624,11 @@ function PlayerForm({ initial, onCancel, onSave }: { initial?: Player; onCancel:
     event.preventDefault();
     if (!name.trim() || !number.trim()) {
       setError("Enter the player’s name and number.");
+      return;
+    }
+    const taken = jerseyTaken(players, number, (player) => player.id === initial?.id);
+    if (taken) {
+      setError(`#${taken.number} is already taken by ${taken.name}.`);
       return;
     }
     onSave({
@@ -1665,6 +1666,20 @@ function PlayerForm({ initial, onCancel, onSave }: { initial?: Player; onCancel:
         <button className="primary-button" type="submit">Save player</button>
       </div>
     </form>
+  );
+}
+
+function DeleteButton({ label = "Delete", onConfirm }: { label?: string; onConfirm: () => void }) {
+  const [armed, setArmed] = useState(false);
+  useEffect(() => {
+    if (!armed) return;
+    const timer = window.setTimeout(() => setArmed(false), 4000);
+    return () => window.clearTimeout(timer);
+  }, [armed]);
+  return (
+    <button type="button" className={`danger-button ${armed ? "is-armed" : ""}`} onClick={() => (armed ? onConfirm() : setArmed(true))}>
+      <Trash2 size={15} /> {armed ? "Confirm delete" : label}
+    </button>
   );
 }
 
@@ -2346,7 +2361,7 @@ function ScoutingPage({
             </article>
           </div>
           <div className="modal-actions no-print">
-            <button className="danger-button" onClick={() => onDelete(selected.id)}><Trash2 size={15} /> Delete</button>
+            <DeleteButton key={selected.id} onConfirm={() => onDelete(selected.id)} />
             <button className="secondary-button" onClick={() => onEdit(selected)}><Pencil size={15} /> Edit</button>
             <button className="primary-button" onClick={() => window.print()}><Printer size={15} /> Print or save PDF</button>
           </div>
@@ -2615,6 +2630,11 @@ function PlayerRegister({ onBack, onSignIn, onCreated }: { onBack: () => void; o
       setError("An account already uses that email. Sign in instead.");
       return;
     }
+    const taken = jerseyTaken(teamRoster(code), number, () => false);
+    if (taken) {
+      setError(`#${taken.number} is already taken on this team. Pick another jersey number.`);
+      return;
+    }
     const account: PlayerAccount = {
       name: name.trim(),
       email: normalized,
@@ -2729,7 +2749,7 @@ function PlayerHome({ email, onSignOut }: { email: string; onSignOut: () => void
   const team = teamByCode(account.teamCode);
   const events = team ? loadList<ScheduleEvent>(team.eventsKey) : [];
   const plays = team ? loadList<Play>(team.playsKey) : [];
-  const roster = team ? loadList<Player>(team.playersKey) : [];
+  const roster = team ? teamRoster(team.code) : [];
   void tick;
 
   const me = roster.find((player) => player.accountEmail === account.email);
@@ -2884,7 +2904,7 @@ function PlayerHome({ email, onSignOut }: { email: string; onSignOut: () => void
                 <div>
                   <p className="eyebrow light">{today}</p>
                   <h2>{greeting()}, {account.name.split(" ")[0]}.</h2>
-                  <p>{team ? `Coach ${team.coach}.` : "Ask your coach to confirm the team code."} {next ? `Next up is ${next.title}.` : "Nothing is on the calendar yet."}</p>
+                  <p>{team ? `${team.name} with Coach ${team.coach}.` : "Ask your coach to confirm the team code."} {next ? `Next up is ${next.title}.` : "Nothing is on the calendar yet."}</p>
                 </div>
                 <div className="hero-record">
                   <div><span>Team</span><strong>{record.games ? record.label : "0–0"}</strong></div>
@@ -2978,7 +2998,7 @@ function PlayerHome({ email, onSignOut }: { email: string; onSignOut: () => void
                 <div><span>Points</span><strong>{averages.ppg}</strong><small>per game</small></div>
                 <div><span>Rebounds</span><strong>{averages.rpg}</strong><small>per game</small></div>
                 <div><span>Assists</span><strong>{averages.apg}</strong><small>per game</small></div>
-                <div><span>Steals</span><strong>{averages.spg}</strong><small>per game you played</small></div>
+                <div><span>Steals</span><strong>{averages.spg}</strong><small>{averages.games} game{averages.games === 1 ? "" : "s"} played</small></div>
               </div>
               {games.length === 0 ? (
                 <EmptyState title="No games played yet" detail="Once a game is over and your coach enters the score, it appears here." />
@@ -3108,6 +3128,11 @@ function PlayerProfile({
     event.preventDefault();
     if (!name.trim() || !number.trim()) {
       setError("Enter your name and jersey number.");
+      return;
+    }
+    const taken = jerseyTaken(teamRoster(account.teamCode), number, (player) => player.accountEmail === account.email);
+    if (taken) {
+      setError(`#${taken.number} is already taken by ${taken.name}.`);
       return;
     }
     savePlayerProfile(account.email, { name: name.trim(), number, position });
@@ -3452,7 +3477,7 @@ export default function App() {
       )}
       {dialog?.type === "event-form" && <Modal title={dialog.draft ? "Edit event" : "Add event"} onClose={closeDialog}><EventForm initial={dialog.draft} onCancel={closeDialog} onSave={saveEvent} /></Modal>}
       {dialog?.type === "play-form" && <Modal title={dialog.draft ? "Edit play" : "New play"} onClose={closeDialog} wide><PlayForm initial={dialog.draft} onCancel={closeDialog} onSave={savePlay} /></Modal>}
-      {dialog?.type === "player-form" && <Modal title={dialog.draft ? "Edit player" : "Add player"} onClose={closeDialog}><PlayerForm initial={dialog.draft} onCancel={closeDialog} onSave={savePlayer} /></Modal>}
+      {dialog?.type === "player-form" && <Modal title={dialog.draft ? "Edit player" : "Add player"} onClose={closeDialog}><PlayerForm initial={dialog.draft} players={players} onCancel={closeDialog} onSave={savePlayer} /></Modal>}
       {dialog?.type === "event" && openEvent && (
         <Modal title={openEvent.title} onClose={closeDialog} wide={openEvent.type === "Game"}>
           <div className="event-detail">
@@ -3475,7 +3500,7 @@ export default function App() {
             <LineupPicker players={players} lineup={openEvent.lineup ?? []} onChange={(ids) => setLineup(openEvent.id, ids)} />
           )}
           <div className="modal-actions">
-            <button className="danger-button" onClick={() => { setEvents((current) => current.filter((item) => item.id !== openEvent.id)); closeDialog(); }}><Trash2 size={15} /> Delete</button>
+            <DeleteButton onConfirm={() => { setEvents((current) => current.filter((item) => item.id !== openEvent.id)); closeDialog(); }} />
             <button className="secondary-button" onClick={() => setDialog({ type: "event-form", draft: openEvent })}><Pencil size={15} /> Edit</button>
             {canReport(openEvent) && (
               openEvent.report
@@ -3494,7 +3519,7 @@ export default function App() {
         <Modal title="Game report" onClose={closeDialog} wide>
           <ReportView event={reportEvent} teamName={profile.teamName} />
           <div className="modal-actions">
-            <button className="danger-button" onClick={() => { setEvents((current) => current.map((item) => item.id === reportEvent.id ? { ...item, report: undefined } : item)); closeDialog(); }}><Trash2 size={15} /> Delete report</button>
+            <DeleteButton label="Delete report" onConfirm={() => { setEvents((current) => current.map((item) => item.id === reportEvent.id ? { ...item, report: undefined } : item)); closeDialog(); }} />
             <button className="primary-button" onClick={() => setDialog({ type: "report-form", id: reportEvent.id })}><Pencil size={15} /> Edit report</button>
           </div>
         </Modal>
@@ -3507,7 +3532,7 @@ export default function App() {
           <p className="detail-line"><span className="tag">{openPlay.category}</span></p>
           <p className="detail-copy">{openPlay.notes || "No notes yet."}</p>
           <div className="modal-actions">
-            <button className="danger-button" onClick={() => { setPlays((current) => current.filter((item) => item.id !== openPlay.id)); closeDialog(); }}><Trash2 size={15} /> Delete</button>
+            <DeleteButton onConfirm={() => { setPlays((current) => current.filter((item) => item.id !== openPlay.id)); closeDialog(); }} />
             <button className="secondary-button" onClick={() => setDialog({ type: "play-form", draft: openPlay })}>Edit</button>
           </div>
         </Modal>
@@ -3519,7 +3544,7 @@ export default function App() {
           <p className="detail-copy">{openPlayer.rating ? `Last rating ${openPlayer.rating} / 10` : "No rating yet."}</p>
           <p className="detail-copy">{openPlayer.review || "No review written yet."}</p>
           <div className="modal-actions">
-            {!openPlayer.accountEmail && <button className="danger-button" onClick={() => { setPlayers((current) => current.filter((item) => item.id !== openPlayer.id)); closeDialog(); }}><Trash2 size={15} /> Delete</button>}
+            {!openPlayer.accountEmail && <DeleteButton onConfirm={() => { setPlayers((current) => current.filter((item) => item.id !== openPlayer.id)); closeDialog(); }} />}
             <button className="secondary-button" onClick={() => setDialog({ type: "player-form", draft: openPlayer })}>Edit</button>
             <button className="primary-button" onClick={() => setDialog({ type: "reviews" })}>Review</button>
           </div>

@@ -677,6 +677,7 @@ button.inline-alert:hover { border-color: #e9ab63; }
 .icon-button:hover { border-color: #c7ccc4; }
 .secondary-button:hover { background: #e9ece5; }
 .danger-button:hover { background: #ffece6; }
+.danger-button.is-armed, .danger-button.is-armed:hover { background: #b9432f; border-color: #b9432f; color: #fff; }
 button:focus-visible { outline: 2px solid var(--accent-mid); outline-offset: 2px; }
 
 @media (max-width: 1100px) {
