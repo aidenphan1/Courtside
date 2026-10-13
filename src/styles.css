@@ -215,6 +215,7 @@ kbd { border: 1px solid #e2e5de; border-radius: 5px; padding: 2px 5px; font-size
 .avatar-stack { display: flex; }
 .avatar-stack i { width: 25px; height: 25px; margin-left: -5px; border: 2px solid white; border-radius: 50%; background: #e7ebdf; color: #586158; display: grid; place-items: center; font: normal 700 10px "Manrope"; }
 .filter-row { display: flex; gap: 7px; }
+.modal-tabs { margin: 16px 0 4px; }
 .filter { border: 1px solid #dde1da; background: #fff; color: #747d75; border-radius: 20px; padding: 8px 14px; font-size: 12px; }
 .filter.active { background: var(--dark); color: white; border-color: var(--dark); }
 .playbook-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; }
@@ -248,7 +249,26 @@ button.diagram { width: 100%; display: block; border: 0; color: inherit; cursor:
 .efficiency i { display: block; height: 100%; border-radius: 4px; }
 .roster-layout { display: grid; grid-template-columns: 1fr 270px; gap: 16px; }
 .roster-table { padding: 0; overflow: hidden; }
-.table-head, .player-row { display: grid; grid-template-columns: 2fr .6fr .8fr .8fr 40px; align-items: center; gap: 12px; padding: 0 19px; }
+.table-head, .player-row { display: grid; grid-template-columns: 2.1fr 1.35fr .55fr .7fr 40px; align-items: center; gap: 12px; padding: 0 19px; }
+.player-stats { display: grid; gap: 2px; min-width: 0; }
+.player-stats strong { font-size: 14px; }
+.player-stats span, .roster-stats-mobile { color: #8b938c; font-size: 11px; }
+.roster-stats-mobile { display: none; }
+.rating-average { border: 0; background: transparent; padding: 0; text-align: left; cursor: pointer; color: inherit; }
+.rating-average:disabled { cursor: default; }
+.rating-average.is-open strong { text-decoration: underline; }
+.rating-history { display: grid; gap: 6px; padding: 0 19px 14px; }
+.rating-history p { margin: 0; color: #8b938c; font-size: 11px; letter-spacing: .6px; text-transform: uppercase; }
+.rating-history div { display: flex; justify-content: space-between; gap: 12px; font-size: 13px; }
+.rating-history.is-static { padding: 8px 0 0; }
+.player-block:last-child .player-row { border-bottom: 0; }
+.review-player { display: grid; gap: 8px; margin-top: 16px; padding-top: 14px; border-top: 1px solid var(--line); }
+.review-player > strong span { color: #8b938c; font-weight: 600; }
+.note-list { display: grid; gap: 10px; }
+.note-card { display: grid; grid-template-columns: 1fr auto; gap: 12px; align-items: start; }
+.note-open { display: grid; gap: 6px; padding: 0; border: 0; background: transparent; text-align: left; cursor: pointer; color: inherit; }
+.note-open p { margin: 0; color: #5f685f; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; white-space: pre-wrap; }
+.note-open small { color: #8b938c; font-size: 12px; }
 .table-head { height: 44px; color: #9aa29b; background: #f8f9f6; border-bottom: 1px solid var(--line); font-size: 11px; text-transform: uppercase; letter-spacing: .8px; }
 .player-row { min-height: 69px; border-bottom: 1px solid #edf0ea; font-size: 11px; }
 .player-row:last-child { border-bottom: 0; }
@@ -529,8 +549,9 @@ button.diagram { width: 100%; display: block; border: 0; color: inherit; cursor:
   .score-team strong { font-size: 34px; }
   .attendance { display: none; }
   .table-head { display: none; }
-  .player-row { grid-template-columns: 1.7fr .4fr .7fr auto; padding: 0 12px; gap: 5px; }
-  .player-row .rating { display: none; }
+  .player-row { grid-template-columns: 1fr auto auto 32px; padding: 0 12px; gap: 8px; }
+  .player-stats { display: none; }
+  .roster-stats-mobile { display: block; }
   .scout-hero { padding: 20px; grid-template-columns: auto 1fr; }
   .scout-record { grid-column: 1 / -1; }
   .scout-record > span { text-align: left; }

@@ -1,5 +1,5 @@
 import { and, eq } from "drizzle-orm";
-import { events, players, plays, scouting, teams } from "../../../db/schema";
+import { coachNotes, events, players, plays, scouting, teams } from "../../../db/schema";
 import { db } from "./db";
 import { cleanText, eventType, isId, jersey, playCategory, playerStatus, position, sameJersey, whole } from "./validate";
 
@@ -10,6 +10,26 @@ const statKeys = ["min", "fgm", "fga", "tpm", "tpa", "ftm", "fta", "reb", "ast",
 
 function list(value: unknown) {
   return Array.isArray(value) ? value : null;
+}
+
+function playerReviews(value: unknown) {
+  const items = list(value) ?? [];
+  if (items.length > 40) return "There are too many player reviews.";
+  const reviews = [];
+  const ids = new Set<string>();
+  for (const item of items) {
+    if (!item || typeof item !== "object") return "Check the player reviews.";
+    const review = item as Record<string, unknown>;
+    const playerId = typeof review.playerId === "string" ? review.playerId : "";
+    if (!isId(playerId) || ids.has(playerId)) return "Check the player reviews.";
+    ids.add(playerId);
+    const rating = cleanText(review.rating, 4);
+    const note = cleanText(review.note, 2000);
+    if (rating && !/^(10|[1-9](\.\d)?)$/.test(rating)) return "Rate each player from 1 to 10.";
+    if (!rating && !note) continue;
+    reviews.push({ playerId, rating, note });
+  }
+  return reviews;
 }
 
 function report(value: unknown) {
@@ -38,7 +58,11 @@ function report(value: unknown) {
     }
     lines.push(parsed);
   }
-  return { teamScore, opponentScore, notes: cleanText(source.notes, 2000), stats: lines };
+  const videoUrl = cleanText(source.videoUrl, 300);
+  if (videoUrl && !/^https:\/\//i.test(videoUrl)) return "Use an https link for the game film.";
+  const reviews = playerReviews(source.reviews);
+  if (typeof reviews === "string") return reviews;
+  return { teamScore, opponentScore, notes: cleanText(source.notes, 2000), stats: lines, ...(videoUrl ? { videoUrl } : {}), ...(reviews.length ? { reviews } : {}) };
 }
 
 export function parseEvents(value: unknown) {
@@ -189,12 +213,55 @@ function playerView(player: PlayerRow) {
   };
 }
 
+export function parseCoachNotes(value: unknown) {
+  const source = list(value);
+  if (!source) return "The notes could not be saved.";
+  if (source.length > 200) return "There are too many notes.";
+  const rows = [];
+  const ids = new Set<string>();
+  for (const item of source) {
+    if (!item || typeof item !== "object") return "Check the note and try again.";
+    const note = item as Record<string, unknown>;
+    if (!isId(note.id) || ids.has(String(note.id))) return "Check the note and try again.";
+    const body = cleanText(note.body, 8000);
+    if (!body) return "Write something before saving the note.";
+    ids.add(String(note.id));
+    rows.push({ id: String(note.id), body, updated: cleanText(note.updated, 80) });
+  }
+  return rows;
+}
+
+export async function replaceCoachNotes(teamId: string, value: unknown) {
+  const parsed = parseCoachNotes(value);
+  if (typeof parsed === "string") return parsed;
+  await db.transaction(async (tx) => {
+    await tx.delete(coachNotes).where(eq(coachNotes.teamId, teamId));
+    if (parsed.length) await tx.insert(coachNotes).values(parsed.map((note) => ({ ...note, teamId })));
+  });
+  return null;
+}
+
+export function forPlayer(workspace: Awaited<ReturnType<typeof workspaceFor>>, email: string) {
+  const me = workspace.players.find((player) => player.accountEmail?.toLowerCase() === email.toLowerCase());
+  const { coachNotes: _private, ...shared } = workspace;
+  return {
+    ...shared,
+    players: workspace.players.map((player) => player.id === me?.id ? player : { ...player, rating: "", review: "" }),
+    events: workspace.events.map((event) => {
+      const report = event.report;
+      if (!report || typeof report !== "object" || !Array.isArray(report.reviews)) return event;
+      return { ...event, report: { ...report, reviews: report.reviews.filter((item) => item && typeof item === "object" && "playerId" in item && item.playerId === me?.id) } };
+    }),
+  };
+}
+
 export async function workspaceFor(team: Team) {
-  const [playerRows, eventRows, playRows, scoutRows] = await Promise.all([
+  const [playerRows, eventRows, playRows, scoutRows, noteRows] = await Promise.all([
     db.select().from(players).where(eq(players.teamId, team.id)),
     db.select().from(events).where(eq(events.teamId, team.id)),
     db.select().from(plays).where(eq(plays.teamId, team.id)),
     db.select().from(scouting).where(eq(scouting.teamId, team.id)),
+    db.select().from(coachNotes).where(eq(coachNotes.teamId, team.id)),
   ]);
   return {
     profile: { name: team.coachName, email: team.coachEmail, teamName: team.name, season: team.season },
@@ -232,6 +299,7 @@ export async function workspaceFor(team: Team) {
       notes: report.notes,
       updated: report.updated,
     })),
+    coachNotes: noteRows.map((note) => ({ id: note.id, body: note.body, updated: note.updated })),
   };
 }
 

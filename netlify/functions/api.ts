@@ -3,7 +3,7 @@ import { getUser } from "@netlify/identity";
 import { eq } from "drizzle-orm";
 import { teams } from "../../db/schema";
 import { db } from "./_shared/db";
-import { replaceEvents, replacePlays, replaceScouting, savePlayerProfile, saveRoster, workspaceFor } from "./_shared/records";
+import { forPlayer, replaceCoachNotes, replaceEvents, replacePlays, replaceScouting, savePlayerProfile, saveRoster, workspaceFor } from "./_shared/records";
 import { ensureMembership } from "./_shared/signup";
 import { profileDetails, teamDetails, themeInput } from "./_shared/validate";
 
@@ -43,7 +43,7 @@ export default async (req: Request, _context: Context) => {
 
     if (req.method === "GET" && path === "/api/workspace") {
       const workspace = await workspaceFor(team);
-      return json({ ...workspace, role });
+      return json({ ...(role === "player" ? forPlayer(workspace, user.email ?? "") : workspace), role });
     }
 
     if (role === "player") {
@@ -52,7 +52,7 @@ export default async (req: Request, _context: Context) => {
         if (typeof details === "string") return json({ error: details }, 400);
         const problem = await savePlayerProfile(user.id, details.name, details.number, details.position);
         if (problem) return json({ error: problem }, 400);
-        return json({ ...(await workspaceFor(team)), role });
+        return json({ ...forPlayer(await workspaceFor(team), user.email ?? ""), role });
       }
       return json({ error: "Players can view the team and update their own details." }, 403);
     }
@@ -90,6 +90,10 @@ export default async (req: Request, _context: Context) => {
     }
     if (req.method === "PUT" && path === "/api/scouting") {
       const problem = await replaceScouting(team.id, await readBody(req));
+      return problem ? json({ error: problem }, 400) : json({ ok: true });
+    }
+    if (req.method === "PUT" && path === "/api/notes") {
+      const problem = await replaceCoachNotes(team.id, await readBody(req));
       return problem ? json({ error: problem }, 400) : json({ ok: true });
     }
 
