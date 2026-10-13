@@ -3,7 +3,8 @@ import { getUser } from "@netlify/identity";
 import { eq } from "drizzle-orm";
 import { teams } from "../../db/schema";
 import { db } from "./_shared/db";
-import { replaceEvents, replacePlays, replaceScouting, savePlayerProfile, saveRoster, teamForUser, workspaceFor } from "./_shared/records";
+import { replaceEvents, replacePlays, replaceScouting, savePlayerProfile, saveRoster, workspaceFor } from "./_shared/records";
+import { ensureMembership } from "./_shared/signup";
 import { profileDetails, teamDetails, themeInput } from "./_shared/validate";
 
 function json(body: unknown, status = 200) {
@@ -21,7 +22,8 @@ async function member() {
   if (!user?.id || !user.email) return { error: json({ error: "Sign in to continue." }, 401) };
   const role = user.roles?.includes("coach") ? "coach" : user.roles?.includes("player") ? "player" : null;
   if (!role) return { error: json({ error: "This account is not linked to a team yet." }, 403) };
-  const team = await teamForUser(user.id, role);
+  const team = await ensureMembership(user);
+  if (typeof team === "string") return { error: json({ error: team }, 400) };
   if (!team) return { error: json({ error: "Your team could not be found." }, 404) };
   return { user, role, team } as const;
 }
