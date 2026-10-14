@@ -51,6 +51,13 @@ export const plays = pgTable("plays", {
   diagram: text().notNull().default(""),
 }, (table) => [index("plays_team_idx").on(table.teamId)]);
 
+export const coachNotes = pgTable("coach_notes", {
+  id: text().primaryKey(),
+  teamId: text("team_id").notNull().references(() => teams.id, { onDelete: "cascade" }),
+  body: text().notNull(),
+  updated: text().notNull().default(""),
+}, (table) => [index("coach_notes_team_idx").on(table.teamId)]);
+
 export const scouting = pgTable("scouting", {
   id: text().primaryKey(),
   teamId: text("team_id").notNull().references(() => teams.id, { onDelete: "cascade" }),

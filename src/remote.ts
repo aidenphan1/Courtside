@@ -30,6 +30,7 @@ export type RemoteWorkspace = {
   plays: unknown[];
   players: unknown[];
   scouting: unknown[];
+  coachNotes?: unknown[];
 };
 
 const publishedAccountMessage = "Real accounts are available on the published Netlify site. Use the demo on this computer, or open your Netlify URL.";
@@ -143,6 +144,10 @@ export function savePlayers(players: unknown[]) {
 
 export function saveScouting(reports: unknown[]) {
   return request("/api/scouting", { method: "PUT", body: JSON.stringify(reports) });
+}
+
+export function saveCoachNotes(notes: unknown[]) {
+  return request("/api/notes", { method: "PUT", body: JSON.stringify(notes) });
 }
 
 export function saveTeamRemote(details: { teamName: string; season: string }) {

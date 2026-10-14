@@ -1,23 +1,22 @@
 import type { Handler } from "@netlify/functions";
-import { createMembership, signupUser } from "./_shared/signup";
+import { readSignup } from "./_shared/signup-check";
 
 const handler: Handler = async (event) => {
   try {
-    const user = signupUser(event.body);
-    const result = await createMembership(user);
-    if (typeof result === "string") return { statusCode: 422, body: result };
+    const user = readSignup(event);
+    if (!user.role) return { statusCode: 422, body: JSON.stringify({ error: "Choose a coach or player account." }) };
     return {
       statusCode: 200,
       body: JSON.stringify({
         app_metadata: {
           ...(user.app_metadata ?? {}),
-          roles: result.roles,
+          roles: [user.role],
         },
       }),
     };
   } catch (error) {
-    console.error(error);
-    return { statusCode: 500, body: "The team could not be created. Try again." };
+    console.error("identity-signup", error);
+    return { statusCode: 500, body: JSON.stringify({ error: "The account could not be created." }) };
   }
 };
 

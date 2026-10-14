@@ -11,6 +11,7 @@ import {
   saveMyProfile,
   savePlays,
   savePlayers,
+  saveCoachNotes,
   saveScouting,
   saveTeamRemote,
   saveThemeRemote,
@@ -54,7 +55,7 @@ import {
   X,
 } from "lucide-react";
 
-type Page = "Overview" | "Schedule" | "Results" | "Playbook" | "Roster" | "Scouting";
+type Page = "Overview" | "Schedule" | "Results" | "Playbook" | "Roster" | "Scouting" | "Notes";
 
 const navigation: { label: Page; icon: typeof LayoutDashboard }[] = [
   { label: "Overview", icon: LayoutDashboard },
@@ -63,6 +64,7 @@ const navigation: { label: Page; icon: typeof LayoutDashboard }[] = [
   { label: "Playbook", icon: NotebookTabs },
   { label: "Roster", icon: Users },
   { label: "Scouting", icon: Target },
+  { label: "Notes", icon: FileText },
 ];
 
 type Theme = { id: string; name: string; accent: string; dark: string };
@@ -115,11 +117,15 @@ type StatKey = (typeof statColumns)[number]["key"];
 
 type StatLine = { playerId: string; name: string; number: string; played: boolean } & Record<StatKey, number>;
 
+type PlayerReview = { playerId: string; rating: string; note: string };
+
 type GameReport = {
   teamScore: number;
   opponentScore: number;
   notes: string;
   stats: StatLine[];
+  videoUrl?: string;
+  reviews?: PlayerReview[];
 };
 
 type Play = {
@@ -156,6 +162,12 @@ type ScoutReport = {
   updated: string;
 };
 
+type CoachNote = {
+  id: string;
+  body: string;
+  updated: string;
+};
+
 type Dialog =
   | null
   | { type: "event-form"; draft?: ScheduleEvent }
@@ -164,10 +176,11 @@ type Dialog =
   | { type: "play"; id: string }
   | { type: "player-form"; draft?: Player }
   | { type: "player"; id: string }
-  | { type: "reviews" }
+  | { type: "reviews"; eventId?: string }
   | { type: "report-form"; id: string }
   | { type: "report"; id: string }
   | { type: "scout-form"; draft?: ScoutReport; opponent?: string }
+  | { type: "note-form"; draft?: CoachNote }
   | { type: "settings" };
 
 const playFilters = ["All plays", "Offense", "Defense", "Out of bounds", "Press break"] as const;
@@ -231,7 +244,7 @@ function loadSession(): CoachSession | null {
   return null;
 }
 
-function dataKey(session: WorkspaceSession, kind: "events" | "plays" | "players" | "scouting") {
+function dataKey(session: WorkspaceSession, kind: "events" | "plays" | "players" | "scouting" | "notes") {
   if (session.kind === "demo") return `courtside.${kind}`;
   return `courtside.${encodeURIComponent(session.email)}.${kind}`;
 }
@@ -512,13 +525,53 @@ function greeting() {
   return "Good evening";
 }
 
+type RatedGame = { event: ScheduleEvent; rating: string; note: string };
+
+function reviewRoster(event: ScheduleEvent, players: Player[]) {
+  const played = (event.report?.stats ?? []).filter((line) => line.played).map((line) => line.playerId);
+  const ids = played.length ? played : (event.lineup ?? []);
+  const listed = ids.flatMap((id) => {
+    const player = players.find((item) => item.id === id);
+    return player ? [player] : [];
+  });
+  return listed.length ? listed : players;
+}
+
+function missingReviews(event: ScheduleEvent, players: Player[]) {
+  if (!event.report) return [];
+  const done = new Set((event.report.reviews ?? []).filter((item) => item.rating && item.note.trim()).map((item) => item.playerId));
+  return reviewRoster(event, players).filter((player) => !done.has(player.id));
+}
+
+function ratingHistory(events: ScheduleEvent[], player: Player): RatedGame[] {
+  return events.flatMap((event) => {
+    const review = event.report?.reviews?.find((item) => item.playerId === player.id && item.rating);
+    return review ? [{ event, rating: review.rating, note: review.note }] : [];
+  }).sort((a, b) => byRecent(a.event, b.event));
+}
+
+function lastRating(events: ScheduleEvent[], player: Player) {
+  return ratingHistory(events, player)[0]?.rating || player.rating || "";
+}
+
+function lastNote(events: ScheduleEvent[], player: Player) {
+  const history = ratingHistory(events, player);
+  return history[0]?.note || (history.length ? "" : player.review);
+}
+
+function averageRating(history: RatedGame[]) {
+  if (!history.length) return "";
+  const total = history.reduce((sum, item) => sum + Number(item.rating), 0);
+  return (total / history.length).toFixed(1);
+}
+
 type Task = { id: string; title: string; detail: string; go: () => void };
 
 function buildTasks(
   events: ScheduleEvent[],
   players: Player[],
   scouting: ScoutReport[],
-  open: { result: (id: string) => void; event: (id: string) => void; roster: () => void; scout: (opponent: string) => void },
+  open: { result: (id: string) => void; event: (id: string) => void; reviews: (id: string) => void; scout: (opponent: string) => void },
 ) {
   const tasks: Task[] = [];
   for (const event of events.filter((item) => canReport(item) && !item.report).sort(byRecent)) {
@@ -534,9 +587,9 @@ function buildTasks(
   for (const event of soon.filter((item) => !item.notes)) {
     tasks.push({ id: `n-${event.id}`, title: `Add notes for ${event.title}`, detail: "Players see these before they arrive", go: () => open.event(event.id) });
   }
-  const unreviewed = players.filter((player) => !player.review).length;
-  if (unreviewed > 0) {
-    tasks.push({ id: "reviews", title: `Write ${unreviewed} player review${unreviewed === 1 ? "" : "s"}`, detail: "Feedback shows on each player’s home", go: open.roster });
+  for (const event of events.filter((item) => missingReviews(item, players).length > 0).sort(byRecent)) {
+    const missing = missingReviews(event, players).length;
+    tasks.push({ id: `v-${event.id}`, title: `Review players from ${event.title}`, detail: `${missing} player${missing === 1 ? "" : "s"} still need a note · ${formatDate(event.date).label}`, go: () => open.reviews(event.id) });
   }
   return tasks;
 }
@@ -572,15 +625,15 @@ function videoEmbed(url: string): VideoEmbed | null {
   return null;
 }
 
-function PlayVideo({ url }: { url: string }) {
+function PlayVideo({ url, title = "Play video" }: { url: string; title?: string }) {
   const embed = videoEmbed(url);
   if (!embed) return null;
-  if (embed.kind === "file") return <video className="play-video" controls src={embed.src} />;
+  if (embed.kind === "file") return <video className="play-video" controls src={embed.src} title={title} />;
   return (
     <iframe
       className="play-video"
       src={embed.src}
-      title="Play video"
+      title={title}
       allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
       allowFullScreen
     />
@@ -814,7 +867,7 @@ function Overview({
   const lastGame = latestReported(events);
   const lastTotals = lastGame?.report ? teamTotals(lastGame.report) : null;
   const latestPlay = plays[0];
-  const reviewsLeft = players.filter((player) => !player.review).length;
+  const reviewsLeft = events.filter((event) => missingReviews(event, players).length > 0).length;
   const nextDate = next ? formatDate(next.date) : null;
   const record = seasonRecord(events);
   const scoutedNext = nextGame ? scouting.some((report) => sameOpponent(report.opponent, nextGame.title)) : false;
@@ -851,7 +904,7 @@ function Overview({
           <div>
             <span>Roster</span>
             <strong>{players.length === 0 ? "No players yet" : `${players.length} player${players.length === 1 ? "" : "s"}`}</strong>
-            <small>{players.length === 0 ? "Share your team code" : reviewsLeft ? `${reviewsLeft} still need a review` : "Everyone has feedback"}</small>
+            <small>{players.length === 0 ? "Share your team code" : reviewsLeft ? `${reviewsLeft} game${reviewsLeft === 1 ? "" : "s"} still need reviews` : "Every game is reviewed"}</small>
           </div>
           <ChevronRight size={18} />
         </button>
@@ -1056,6 +1109,82 @@ function EventForm({ initial, onCancel, onSave }: { initial?: ScheduleEvent; onC
   );
 }
 
+function EventDetail({
+  event,
+  players,
+  onEdit,
+  onDelete,
+  onReport,
+  onSave,
+}: {
+  event: ScheduleEvent;
+  players: Player[];
+  onEdit: () => void;
+  onDelete: () => void;
+  onReport: () => void;
+  onSave: (lineup: string[], notes: string) => void;
+}) {
+  const canPick = event.type === "Game" && isUpcoming(event);
+  const [tab, setTab] = useState<"lineup" | "notes">(canPick ? "lineup" : "notes");
+  const [lineup, setLineupDraft] = useState(event.lineup ?? []);
+  const [notes, setNotes] = useState(event.notes);
+
+  function save(formEvent?: FormEvent) {
+    formEvent?.preventDefault();
+    onSave(canPick ? lineup : (event.lineup ?? []), notes.trim());
+  }
+
+  return (
+    <>
+      <div className="event-detail">
+        <span className={`event-stripe ${eventAccent[event.type]}`} />
+        <div>
+          <span className="tag">{event.type}</span>
+          <p><CalendarDays size={15} /> {formatDate(event.date).label} · {formatTime(event.time)}</p>
+          <p><ShieldCheck size={15} /> {event.location}</p>
+        </div>
+      </div>
+      {event.report && (
+        <p className="detail-copy">
+          <span className={`result-pill result-${resultOf(event.report)}`}>{resultOf(event.report)}</span>{" "}
+          Final {event.report.teamScore}–{event.report.opponentScore}
+        </p>
+      )}
+      {canPick && (
+        <div className="filter-row modal-tabs">
+          <button type="button" className={`filter ${tab === "lineup" ? "active" : ""}`} onClick={() => setTab("lineup")}>Lineup</button>
+          <button type="button" className={`filter ${tab === "notes" ? "active" : ""}`} onClick={() => setTab("notes")}>Notes</button>
+        </div>
+      )}
+      {canPick && tab === "lineup" ? (
+        <>
+          <LineupPicker players={players} lineup={lineup} onChange={setLineupDraft} hint="Tick who’s in, then save. Players see it on their schedule." />
+          <div className="modal-actions">
+            <DeleteButton onConfirm={onDelete} />
+            <button className="secondary-button" type="button" onClick={onEdit}><Pencil size={15} /> Edit</button>
+            <button className="primary-button" type="button" onClick={() => save()}>Save lineup</button>
+          </div>
+        </>
+      ) : (
+        <form onSubmit={save}>
+          <label>Coach notes
+            <textarea value={notes} onChange={(change) => setNotes(change.target.value)} placeholder="What players should know before this event." />
+          </label>
+          <p className="field-hint">Players see these notes with the event.</p>
+          <div className="modal-actions">
+            <DeleteButton onConfirm={onDelete} />
+            <button className="secondary-button" type="button" onClick={onEdit}><Pencil size={15} /> Edit</button>
+            {canReport(event) && (
+              <button className="secondary-button" type="button" onClick={onReport}><BarChart3 size={15} /> {event.report ? "View result" : "Enter result"}</button>
+            )}
+            <button className="primary-button" type="submit">Save notes</button>
+          </div>
+        </form>
+      )}
+    </>
+  );
+}
+
 function linesForLineup(event: ScheduleEvent, players: Player[]) {
   const saved = event.report?.stats ?? [];
   return (event.lineup ?? []).flatMap((id) => {
@@ -1072,7 +1201,7 @@ function blankLine(player: Player): StatLine {
   return line;
 }
 
-function LineupPicker({ players, lineup, onChange }: { players: Player[]; lineup: string[]; onChange: (ids: string[]) => void }) {
+function LineupPicker({ players, lineup, onChange, hint }: { players: Player[]; lineup: string[]; onChange: (ids: string[]) => void; hint?: string }) {
   const ordered = [...players].sort((a, b) => Number(a.status === "Out") - Number(b.status === "Out"));
 
   return (
@@ -1104,7 +1233,7 @@ function LineupPicker({ players, lineup, onChange }: { players: Player[]; lineup
           })}
         </div>
       )}
-      <p className="field-hint">Only the players you tick are in this game’s box score.</p>
+      <p className="field-hint">{hint ?? "Only the players you tick are in this game’s box score."}</p>
     </div>
   );
 }
@@ -1128,6 +1257,7 @@ function ReportForm({
   const [teamScore, setTeamScore] = useState(existing ? String(existing.teamScore) : "");
   const [opponentScore, setOpponentScore] = useState(existing ? String(existing.opponentScore) : "");
   const [notes, setNotes] = useState(existing?.notes ?? "");
+  const [videoUrl, setVideoUrl] = useState(existing?.videoUrl ?? "");
   const lineupKey = (event.lineup ?? []).join("|");
   const [lines, setLines] = useState<StatLine[]>(() => linesForLineup(event, players));
   useEffect(() => {
@@ -1162,7 +1292,11 @@ function ReportForm({
       setError(`Player points add up to ${playerPoints}, more than the final score of ${teamScore}. Check the box score.`);
       return;
     }
-    onSave({ teamScore: Number(teamScore), opponentScore: Number(opponentScore), notes: notes.trim(), stats: lines });
+    if (videoUrl.trim() && !videoEmbed(videoUrl)) {
+      setError("Use a YouTube, Vimeo, or direct .mp4 / .webm link for the game film.");
+      return;
+    }
+    onSave({ teamScore: Number(teamScore), opponentScore: Number(opponentScore), notes: notes.trim(), stats: lines, videoUrl: videoUrl.trim() });
   }
 
   return (
@@ -1221,6 +1355,10 @@ function ReportForm({
       <label>Post-game notes
         <textarea value={notes} onChange={(e) => setNotes(e.target.value)} placeholder="What went well, what to fix at the next practice, standout efforts." />
       </label>
+      <label>Game film link
+        <input value={videoUrl} onChange={(e) => setVideoUrl(e.target.value)} placeholder="https://www.youtube.com/watch?v=..." />
+      </label>
+      <p className="field-hint">Players can watch this from their results. YouTube, Vimeo, or a direct .mp4 / .webm link. Unlisted YouTube links work too.</p>
       {error && <p className="field-error">{error}</p>}
       <div className="modal-actions">
         <button className="secondary-button" type="button" onClick={onCancel}>Cancel</button>
@@ -1329,6 +1467,13 @@ function ReportView({ event, teamName, highlightId }: { event: ScheduleEvent; te
 
       <div className="report-section-head"><h4>Coach’s notes</h4></div>
       <p className="detail-copy report-notes">{report.notes || "No post-game notes yet."}</p>
+
+      {report.videoUrl && videoEmbed(report.videoUrl) && (
+        <>
+          <div className="report-section-head"><h4>Game film</h4></div>
+          <PlayVideo url={report.videoUrl} title={`Game film vs. ${opponentName(event.title)}`} />
+        </>
+      )}
     </div>
   );
 }
@@ -1835,7 +1980,7 @@ function ResultsPage({
         <div className="event-date"><span>{when.day}</span><strong>{when.date}</strong></div>
         <div className={`event-stripe ${report ? `result-stripe-${resultOf(report)}` : "orange"}`} />
         <div className="event-info">
-          <span className="tag">{report ? "Final" : "Needs result"}</span>
+          <span className="tag">{report ? "Final" : "Needs result"}{report?.videoUrl ? " · Film" : ""}</span>
           <h3>{event.title}</h3>
           <p><Clock3 size={14} /> {when.label} · {formatTime(event.time)} · {event.location}</p>
           {report?.notes ? <p className="event-notes">{report.notes}</p> : null}
@@ -2093,7 +2238,7 @@ function SettingsPanel({
         <p className="eyebrow">Players</p>
         <TeamCodeCard code={teamCode} />
       </section>
-      <p className="field-hint">Your schedule, playbook, roster, results, and scouting are saved in this browser.</p>
+      <p className="field-hint">Your schedule, playbook, roster, results, scouting, and private notes are saved in this browser.</p>
       <div className="modal-actions">
         <button className="primary-button" onClick={onClose}>Done</button>
       </div>
@@ -2125,20 +2270,50 @@ function TeamCodeCard({ code }: { code: string }) {
   );
 }
 
+function PlayerRatingSummary({ player, events }: { player: Player; events: ScheduleEvent[] }) {
+  const history = ratingHistory(events, player);
+  const latest = lastRating(events, player);
+  const note = lastNote(events, player);
+  const average = averageRating(history);
+  const stats = playerAverages(events, player.id);
+  return (
+    <>
+      <p className="detail-copy">{stats.games ? `${stats.ppg} PPG · ${stats.rpg} REB · ${stats.apg} AST · ${stats.games} game${stats.games === 1 ? "" : "s"}` : "No box score yet."}</p>
+      <p className="detail-copy">{latest ? `Last rating ${latest} / 10` : "No rating yet."}{average ? ` · Average ${average} / 10` : ""}</p>
+      <p className="detail-copy">{note || "No review written yet."}</p>
+      {history.length > 0 && (
+        <div className="rating-history is-static">
+          <p>Last {Math.min(5, history.length)} rating{history.length === 1 ? "" : "s"}</p>
+          {history.slice(0, 5).map((item) => (
+            <div key={item.event.id}>
+              <span>{opponentName(item.event.title)} · {formatDate(item.event.date).label}</span>
+              <strong>{item.rating} / 10</strong>
+            </div>
+          ))}
+        </div>
+      )}
+    </>
+  );
+}
+
 function RosterPage({
   players,
+  events,
   teamCode,
   onAdd,
   onOpen,
   onReview,
 }: {
   players: Player[];
+  events: ScheduleEvent[];
   teamCode: string;
   onAdd: () => void;
   onOpen: (id: string) => void;
-  onReview: () => void;
+  onReview: (eventId?: string) => void;
 }) {
-  const reviewed = players.filter((player) => player.review);
+  const [historyFor, setHistoryFor] = useState<string | null>(null);
+  const needing = events.filter((event) => missingReviews(event, players).length > 0).sort(byRecent);
+  const nextReview = needing[0];
 
   return (
     <section className="page-stack">
@@ -2156,24 +2331,59 @@ function RosterPage({
       ) : (
         <div className="roster-layout">
           <div className="panel roster-table">
-            <div className="table-head"><span>Player</span><span>Position</span><span>Status</span><span>Last rating</span><span /></div>
-            {players.map((player) => (
-              <div className="player-row" key={player.id}>
-                <div className="player-name"><div className="avatar player-avatar">{initials(player.name)}</div><div><strong>{player.name}</strong><span>#{player.number}{player.accountEmail ? " · Account" : ""}</span></div></div>
-                <strong>{player.position}</strong>
-                <span className={`status ${player.status.toLowerCase()}`}>{player.status}</span>
-                <div className="rating"><strong>{player.rating || "—"}</strong>{player.rating && <span>/ 10</span>}</div>
-                <button className="icon-button" aria-label={`Open ${player.name}`} onClick={() => onOpen(player.id)}><ChevronRight size={18} /></button>
-              </div>
-            ))}
+            <div className="table-head"><span>Player</span><span>Stats</span><span>Last</span><span>Average</span><span /></div>
+            {players.map((player) => {
+              const history = ratingHistory(events, player);
+              const average = averageRating(history);
+              const latest = lastRating(events, player);
+              const stats = playerAverages(events, player.id);
+              const open = historyFor === player.id;
+              return (
+                <div className="player-block" key={player.id}>
+                  <div className="player-row">
+                    <div className="player-name">
+                      <div className="avatar player-avatar">{initials(player.name)}</div>
+                      <div>
+                        <strong>{player.name}</strong>
+                        <span>#{player.number} · {player.position} · {player.status}{player.accountEmail ? " · Account" : ""}</span>
+                        <span className="roster-stats-mobile">{stats.games ? `${stats.ppg} PPG · ${stats.rpg} REB · ${stats.apg} AST` : "No games yet"}</span>
+                      </div>
+                    </div>
+                    <div className="player-stats"><strong>{stats.games ? stats.ppg : "—"}</strong><span>{stats.games ? `${stats.rpg} REB · ${stats.apg} AST · ${stats.games} GP` : "No games yet"}</span></div>
+                    <div className="rating"><strong>{latest || "—"}</strong>{latest && <span>/ 10</span>}</div>
+                    <button type="button" className={`rating rating-average ${open ? "is-open" : ""}`} onClick={() => setHistoryFor(open ? null : player.id)} disabled={!history.length && !latest} aria-expanded={open}>
+                      <strong>{average || latest || "—"}</strong>{(average || latest) && <span>/ 10</span>}
+                    </button>
+                    <button className="icon-button" aria-label={`Open ${player.name}`} onClick={() => onOpen(player.id)}><ChevronRight size={18} /></button>
+                  </div>
+                  {open && (
+                    <div className="rating-history">
+                      <p>{history.length ? `Last ${Math.min(5, history.length)} rating${history.length === 1 ? "" : "s"}` : "Saved rating"}</p>
+                      {history.slice(0, 5).map((item) => (
+                        <div key={item.event.id}>
+                          <span>{opponentName(item.event.title)} · {formatDate(item.event.date).label}</span>
+                          <strong>{item.rating} / 10</strong>
+                        </div>
+                      ))}
+                      {!history.length && latest && (
+                        <div>
+                          <span>Earlier feedback</span>
+                          <strong>{latest} / 10</strong>
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
           </div>
           <aside className="panel review-card">
             <div className="stat-icon blue"><ClipboardList size={21} /></div>
             <p className="eyebrow">Game reviews</p>
-            <h3>{reviewed.length === 0 ? "No reviews yet" : `${reviewed.length} written`}</h3>
-            <p>{players.length === reviewed.length ? "Everyone has feedback." : "Write a short note for each player after the game."}</p>
+            <h3>{needing.length === 0 ? "Every game reviewed" : `${needing.length} game${needing.length === 1 ? "" : "s"} left`}</h3>
+            <p>{nextReview ? `Write a note for each player who played ${nextReview.title}.` : "After you save a result, review the players from that game."}</p>
             <div className="review-avatars">{players.slice(0, 4).map((player) => <span key={player.id}>{initials(player.name)}</span>)}</div>
-            <button className="primary-button" onClick={onReview}>Start reviews <ChevronRight size={16} /></button>
+            <button className="primary-button" onClick={() => onReview(nextReview?.id)}>Start reviews <ChevronRight size={16} /></button>
           </aside>
         </div>
       )}
@@ -2825,7 +3035,7 @@ function PlayerHome({ email, onSignOut }: { email: string; onSignOut: () => void
   };
   const team = { name: workspace.profile.teamName, coach: workspace.coachName, season: workspace.profile.season };
   const mine = me?.id ?? `acct:${account.email}`;
-  const self = {
+  const selfPlayer: Player = {
     id: mine,
     name: account.name,
     number: account.number,
@@ -2833,6 +3043,13 @@ function PlayerHome({ email, onSignOut }: { email: string; onSignOut: () => void
     status: me?.status ?? "Ready",
     rating: me?.rating ?? "",
     review: me?.review ?? "",
+  };
+  const myRatings = ratingHistory(events, selfPlayer);
+  const latestRating = myRatings[0];
+  const self = {
+    ...selfPlayer,
+    rating: latestRating?.rating || selfPlayer.rating,
+    review: latestRating?.note || (myRatings.length ? "" : selfPlayer.review),
   };
   const upcoming = events.filter(isUpcoming).sort(bySchedule);
   const next = upcoming[0];
@@ -2855,7 +3072,7 @@ function PlayerHome({ email, onSignOut }: { email: string; onSignOut: () => void
       detail: event.notes,
       go: () => setPage("Schedule"),
     })),
-    ...(self.review ? [{ id: "review", title: "Coach left you feedback", detail: self.rating ? `Rated ${self.rating} / 10` : "Open Home to read it", go: () => setPage("Home") }] : []),
+    ...(self.review ? [{ id: "review", title: "Coach left you feedback", detail: latestRating ? `Rated ${self.rating} / 10 after ${opponentName(latestRating.event.title)}` : `Rated ${self.rating} / 10`, go: () => setPage("Home") }] : []),
   ];
 
   function go(nextPage: PlayerPage) {
@@ -2872,7 +3089,7 @@ function PlayerHome({ email, onSignOut }: { email: string; onSignOut: () => void
         <div className="event-date"><span>{when.day}</span><strong>{when.date}</strong></div>
         <div className={`event-stripe ${event.report ? `result-stripe-${resultOf(event.report)}` : eventAccent[event.type]}`} />
         <div className="event-info">
-          <span className="tag">{event.type}{!event.report && daysUntil(event.date) === 0 ? " · Today" : !event.report && daysUntil(event.date) === 1 ? " · Tomorrow" : ""}</span>
+          <span className="tag">{event.type}{event.report?.videoUrl ? " · Film" : ""}{!event.report && daysUntil(event.date) === 0 ? " · Today" : !event.report && daysUntil(event.date) === 1 ? " · Tomorrow" : ""}</span>
           <h3>{event.title}</h3>
           <p><Clock3 size={14} /> {formatTime(event.time)} · {event.location}</p>
           {event.notes ? <p className="event-notes">{event.notes}</p> : null}
@@ -3018,7 +3235,15 @@ function PlayerHome({ email, onSignOut }: { email: string; onSignOut: () => void
                     <div><p className="eyebrow">From your coach</p><h3>{self.review ? "Latest feedback" : "No feedback yet"}</h3></div>
                     {self.rating && <span className="theme-chip">{self.rating} / 10</span>}
                   </div>
-                  <p className="detail-copy report-notes">{self.review || "When your coach writes a review, it stays here for you. Teammates can’t see it."}</p>
+                  <p className="detail-copy report-notes">{self.review || "When your coach writes a review after a game, it stays here for you. Teammates can’t see it."}</p>
+                  {latestRating && <p className="field-hint">After {opponentName(latestRating.event.title)} · {formatDate(latestRating.event.date).label}{myRatings.length > 1 ? ` · Average ${averageRating(myRatings)} / 10` : ""}</p>}
+                  {myRatings.length > 1 && (
+                    <div className="rating-history is-static">
+                      {myRatings.slice(0, 5).map((item) => (
+                        <div key={item.event.id}><span>{opponentName(item.event.title)} · {formatDate(item.event.date).label}</span><strong>{item.rating} / 10</strong></div>
+                      ))}
+                    </div>
+                  )}
                 </article>
                 <article className="panel">
                   <div className="panel-heading">
@@ -3241,65 +3466,86 @@ function PlayerProfile({
 }
 
 function ReviewEditor({
+  events,
   players,
+  eventId,
   onClose,
   onSave,
 }: {
+  events: ScheduleEvent[];
   players: Player[];
+  eventId?: string;
   onClose: () => void;
-  onSave: (id: string, rating: string, review: string) => void;
+  onSave: (eventId: string, reviews: PlayerReview[]) => void;
 }) {
-  const [selectedId, setSelectedId] = useState(players.find((player) => !player.review)?.id ?? players[0]?.id ?? "");
-  const selected = players.find((player) => player.id === selectedId);
-  const [rating, setRating] = useState(selected?.rating ?? "");
-  const [review, setReview] = useState(selected?.review ?? "");
+  const reported = events.filter((event) => event.report).sort(byRecent);
+  const [gameId, setGameId] = useState(eventId && reported.some((event) => event.id === eventId) ? eventId : reported[0]?.id ?? "");
+  const game = reported.find((event) => event.id === gameId);
+  const roster = game ? reviewRoster(game, players) : [];
+  const [drafts, setDrafts] = useState<Record<string, { rating: string; note: string }>>({});
   const [error, setError] = useState("");
 
-  function choose(id: string) {
-    const player = players.find((item) => item.id === id);
-    setSelectedId(id);
-    setRating(player?.rating ?? "");
-    setReview(player?.review ?? "");
-    setError("");
+  function draftFor(player: Player) {
+    return drafts[`${gameId}:${player.id}`] ?? {
+      rating: game?.report?.reviews?.find((item) => item.playerId === player.id)?.rating ?? "",
+      note: game?.report?.reviews?.find((item) => item.playerId === player.id)?.note ?? "",
+    };
   }
 
-  function submit(event: FormEvent) {
-    event.preventDefault();
-    if (!selected) return;
-    const score = Number(rating);
-    if (!rating || Number.isNaN(score) || score < 1 || score > 10) {
-      setError("Rate the player from 1 to 10.");
-      return;
-    }
-    if (!review.trim()) {
-      setError("Write a short note the player can use.");
-      return;
-    }
-    onSave(selected.id, rating, review.trim());
-    const remaining = players.find((player) => player.id !== selected.id && !player.review);
-    if (remaining) choose(remaining.id);
+  function update(playerId: string, change: Partial<{ rating: string; note: string }>) {
+    const player = roster.find((item) => item.id === playerId);
+    if (!player) return;
+    setDrafts((current) => ({ ...current, [`${gameId}:${playerId}`]: { ...draftFor(player), ...change } }));
   }
+
+  function submit(formEvent: FormEvent) {
+    formEvent.preventDefault();
+    if (!game) return;
+    const reviews = roster.map((player) => ({ playerId: player.id, ...draftFor(player), note: draftFor(player).note.trim() }));
+    const bad = reviews.find((item) => {
+      const score = Number(item.rating);
+      return !item.rating || Number.isNaN(score) || score < 1 || score > 10 || !item.note;
+    });
+    if (bad) {
+      const player = roster.find((item) => item.id === bad.playerId);
+      setError(`Rate ${player?.name ?? "each player"} from 1 to 10 and write a short note.`);
+      return;
+    }
+    onSave(game.id, reviews);
+  }
+
+  if (!game) return <p className="field-hint">Save a game result first. Reviews are written for each game after the score is in.</p>;
 
   return (
     <form onSubmit={submit}>
-      <div className="review-picks">
-        {players.map((player) => (
-          <button key={player.id} type="button" className={player.id === selectedId ? "active" : ""} onClick={() => choose(player.id)}>
-            {player.name}
-            <small>{player.review ? "Reviewed" : "Needs review"}</small>
-          </button>
-        ))}
-      </div>
-      <label>Rating out of 10<input inputMode="decimal" value={rating} placeholder="7.5" onChange={(event) => {
-        const value = event.target.value.replace(/[^\d.]/g, "").replace(/(\..*)\./g, "$1");
-        const [whole, fraction] = value.split(".");
-        setRating(fraction === undefined ? whole.slice(0, 2) : `${whole.slice(0, 2)}.${fraction.slice(0, 1)}`);
-      }} /></label>
-      <label>Feedback<textarea value={review} onChange={(event) => setReview(event.target.value)} placeholder="What they did well, and one thing to work on." /></label>
+      <label>Game
+        <select value={gameId} onChange={(event) => { setGameId(event.target.value); setError(""); }}>
+          {reported.map((event) => <option key={event.id} value={event.id}>{event.title} · {formatDate(event.date).label}</option>)}
+        </select>
+      </label>
+      <p className="field-hint">Everyone who played {opponentName(game.title)} needs a rating and a note. Players only see their own.</p>
+      {roster.map((player) => {
+        const draft = draftFor(player);
+        return (
+          <div className="review-player" key={player.id}>
+            <strong>{player.name} <span>#{player.number}</span></strong>
+            <label>Rating out of 10
+              <input inputMode="decimal" value={draft.rating} placeholder="7.5" onChange={(event) => {
+                const value = event.target.value.replace(/[^\d.]/g, "").replace(/(\..*)\./g, "$1");
+                const [whole, fraction] = value.split(".");
+                update(player.id, { rating: fraction === undefined ? whole.slice(0, 2) : `${whole.slice(0, 2)}.${fraction.slice(0, 1)}` });
+              }} />
+            </label>
+            <label>Feedback
+              <textarea value={draft.note} onChange={(event) => update(player.id, { note: event.target.value })} placeholder="What they did well, and one thing to work on." />
+            </label>
+          </div>
+        );
+      })}
       {error && <p className="field-error">{error}</p>}
       <div className="modal-actions">
-        <button className="secondary-button" type="button" onClick={onClose}>Done</button>
-        <button className="primary-button" type="submit">Save review</button>
+        <button className="secondary-button" type="button" onClick={onClose}>Cancel</button>
+        <button className="primary-button" type="submit">Save reviews</button>
       </div>
     </form>
   );
@@ -3384,6 +3630,84 @@ function ResetPassword({ onDone }: { onDone: () => void }) {
   );
 }
 
+function noteTitle(body: string) {
+  const line = body.split("\n").map((part) => part.trim()).find(Boolean) ?? "Note";
+  return line.length > 80 ? `${line.slice(0, 77)}…` : line;
+}
+
+function savedLabel() {
+  return new Date().toLocaleString("en-US", { month: "short", day: "numeric", year: "numeric", hour: "numeric", minute: "2-digit" });
+}
+
+function NotesPage({
+  notes,
+  onNew,
+  onOpen,
+  onDelete,
+}: {
+  notes: CoachNote[];
+  onNew: () => void;
+  onOpen: (note: CoachNote) => void;
+  onDelete: (id: string) => void;
+}) {
+  return (
+    <section className="page-stack">
+      <div className="section-intro">
+        <div>
+          <p className="eyebrow">{notes.length === 0 ? "Nothing saved" : `${notes.length} private note${notes.length === 1 ? "" : "s"}`}</p>
+          <h2>Your notes</h2>
+          <p>Reminders, practice ideas, and anything else you want to keep. Only you can see these.</p>
+        </div>
+        <button className="primary-button" onClick={onNew}><Plus size={17} /> New note</button>
+      </div>
+      {notes.length === 0 ? (
+        <EmptyState title="No notes yet" detail="Write a note and save it. It stays with your team, and players never see it." action="New note" onAction={onNew} />
+      ) : (
+        <div className="note-list">
+          {notes.map((note) => (
+            <article className="panel note-card" key={note.id}>
+              <button className="note-open" onClick={() => onOpen(note)}>
+                <strong>{noteTitle(note.body)}</strong>
+                <p>{note.body}</p>
+                <small>{note.updated}</small>
+              </button>
+              <DeleteButton onConfirm={() => onDelete(note.id)} />
+            </article>
+          ))}
+        </div>
+      )}
+    </section>
+  );
+}
+
+function NoteForm({ initial, onCancel, onSave }: { initial?: CoachNote; onCancel: () => void; onSave: (note: CoachNote) => void }) {
+  const [body, setBody] = useState(initial?.body ?? "");
+  const [error, setError] = useState("");
+
+  function submit(event: FormEvent) {
+    event.preventDefault();
+    if (!body.trim()) {
+      setError("Write something before saving.");
+      return;
+    }
+    onSave({ id: initial?.id ?? crypto.randomUUID(), body: body.trim(), updated: savedLabel() });
+  }
+
+  return (
+    <form onSubmit={submit}>
+      <label>Note
+        <textarea value={body} onChange={(event) => setBody(event.target.value)} placeholder="What you want to remember." rows={8} />
+      </label>
+      <p className="field-hint">This stays on your account. Players can’t open it.</p>
+      {error && <p className="field-error">{error}</p>}
+      <div className="modal-actions">
+        <button className="secondary-button" type="button" onClick={onCancel}>Cancel</button>
+        <button className="primary-button" type="submit">Save note</button>
+      </div>
+    </form>
+  );
+}
+
 export default function App() {
   const [session, setSession] = useState<CoachSession | null>(() => loadSession());
   const [screen, setScreen] = useState<Screen>(() => {
@@ -3410,6 +3734,10 @@ export default function App() {
     const current = loadSession();
     return current && current.kind !== "player" ? loadList(dataKey(current, "scouting")) : [];
   });
+  const [coachNotes, setCoachNotes] = useState<CoachNote[]>(() => {
+    const current = loadSession();
+    return current && current.kind !== "player" ? loadList(dataKey(current, "notes")) : [];
+  });
   const [, setClock] = useState(0);
   const [booting, setBooting] = useState(true);
   const [syncError, setSyncError] = useState("");
@@ -3419,21 +3747,25 @@ export default function App() {
   const skipPlays = useRef(false);
   const skipPlayers = useRef(false);
   const skipScouting = useRef(false);
+  const skipNotes = useRef(false);
   const coachOnline = session?.kind === "coach";
   useServerList(events, coachOnline, skipEvents, saveEvents, setSyncError);
   useServerList(plays, coachOnline, skipPlays, savePlays, setSyncError);
   useServerList(players, coachOnline, skipPlayers, savePlayers, setSyncError);
   useServerList(scouting, coachOnline, skipScouting, saveScouting, setSyncError);
+  useServerList(coachNotes, coachOnline, skipNotes, saveCoachNotes, setSyncError);
 
   function showWorkspace(data: RemoteWorkspace) {
     skipEvents.current = true;
     skipPlays.current = true;
     skipPlayers.current = true;
     skipScouting.current = true;
+    skipNotes.current = true;
     setEvents(data.events as ScheduleEvent[]);
     setPlays(data.plays as Play[]);
     setPlayers(data.players as Player[]);
     setScouting(data.scouting as ScoutReport[]);
+    setCoachNotes((data.coachNotes ?? []) as CoachNote[]);
     setCoachProfile({ name: data.profile.name, teamName: data.profile.teamName, season: data.profile.season, demo: false });
     setCoachCode(data.teamCode);
     setTheme(data.theme);
@@ -3512,6 +3844,10 @@ export default function App() {
   }, [players, session]);
   useEffect(() => {
     if (session?.kind !== "demo") return;
+    localStorage.setItem(dataKey(session, "notes"), JSON.stringify(coachNotes));
+  }, [coachNotes, session]);
+  useEffect(() => {
+    if (session?.kind !== "demo") return;
     const code = teamCodeFor(session);
     const apply = () => setPlayers((current) => mergeRoster(code, current));
     apply();
@@ -3538,6 +3874,7 @@ export default function App() {
     setPlays(loadList(dataKey(next, "plays")));
     setPlayers(loadList(dataKey(next, "players")));
     setScouting(loadList(dataKey(next, "scouting")));
+    setCoachNotes(loadList(dataKey(next, "notes")));
     setSession(next);
     sessionStorage.setItem("courtside.session", JSON.stringify(next));
     setPage("Overview");
@@ -3593,7 +3930,7 @@ export default function App() {
   const tasks = buildTasks(events, players, scouting, {
     result: (id) => { setPage("Results"); setDialog({ type: "report-form", id }); },
     event: (id) => { setPage("Schedule"); setDialog({ type: "event", id }); },
-    roster: () => { setPage("Roster"); setDialog({ type: "reviews" }); },
+    reviews: (id) => { setPage("Roster"); setDialog({ type: "reviews", eventId: id }); },
     scout: (opponent) => { setPage("Scouting"); setDialog({ type: "scout-form", opponent }); },
   });
   const resultsDue = events.filter((event) => canReport(event) && !event.report).length;
@@ -3637,7 +3974,8 @@ export default function App() {
 
   function saveReport(id: string, report: GameReport) {
     setEvents((current) => current.map((event) => event.id === id ? { ...event, report } : event));
-    setDialog({ type: "report", id });
+    setPage("Results");
+    closeDialog();
   }
   const openPlay = plays.find((play) => dialog?.type === "play" && play.id === dialog.id);
   const openPlayer = players.find((player) => dialog?.type === "player" && player.id === dialog.id);
@@ -3694,7 +4032,15 @@ export default function App() {
           {page === "Schedule" && <SchedulePage events={events} players={players} onAdd={() => setDialog({ type: "event-form" })} onOpen={(id) => setDialog({ type: "event", id })} onResults={() => setPage("Results")} />}
           {page === "Results" && <ResultsPage events={events} teamName={profile.teamName} onOpen={(id) => setDialog({ type: "report", id })} onReport={(id) => setDialog({ type: "report-form", id })} />}
           {page === "Playbook" && <PlaybookPage plays={plays} onAdd={() => setDialog({ type: "play-form" })} onOpen={(id) => setDialog({ type: "play", id })} />}
-          {page === "Roster" && <RosterPage players={players} teamCode={teamCode} onAdd={() => setDialog({ type: "player-form" })} onOpen={(id) => setDialog({ type: "player", id })} onReview={() => setDialog({ type: "reviews" })} />}
+          {page === "Roster" && <RosterPage players={players} events={events} teamCode={teamCode} onAdd={() => setDialog({ type: "player-form" })} onOpen={(id) => setDialog({ type: "player", id })} onReview={(eventId) => setDialog({ type: "reviews", eventId })} />}
+          {page === "Notes" && (
+            <NotesPage
+              notes={coachNotes}
+              onNew={() => setDialog({ type: "note-form" })}
+              onOpen={(note) => setDialog({ type: "note-form", draft: note })}
+              onDelete={(id) => setCoachNotes((current) => current.filter((note) => note.id !== id))}
+            />
+          )}
           {page === "Scouting" && (
             <ScoutingPage
               reports={scouting}
@@ -3725,6 +4071,19 @@ export default function App() {
           />
         </Modal>
       )}
+      {dialog?.type === "note-form" && (
+        <Modal title={dialog.draft ? "Edit note" : "New note"} onClose={closeDialog}>
+          <NoteForm
+            initial={dialog.draft}
+            onCancel={closeDialog}
+            onSave={(note) => {
+              setCoachNotes((current) => current.some((item) => item.id === note.id) ? current.map((item) => item.id === note.id ? note : item) : [note, ...current]);
+              setPage("Notes");
+              closeDialog();
+            }}
+          />
+        </Modal>
+      )}
       {dialog?.type === "scout-form" && (
         <Modal title={dialog.draft ? `Edit ${dialog.draft.opponent}` : "New scouting report"} onClose={closeDialog} wide>
           <ScoutForm initial={dialog.draft} opponent={dialog.opponent} onCancel={closeDialog} onSave={saveScout} />
@@ -3735,34 +4094,19 @@ export default function App() {
       {dialog?.type === "player-form" && <Modal title={dialog.draft ? "Edit player" : "Add player"} onClose={closeDialog}><PlayerForm initial={dialog.draft} players={players} onCancel={closeDialog} onSave={savePlayer} /></Modal>}
       {dialog?.type === "event" && openEvent && (
         <Modal title={openEvent.title} onClose={closeDialog} wide={openEvent.type === "Game"}>
-          <div className="event-detail">
-            <span className={`event-stripe ${eventAccent[openEvent.type]}`} />
-            <div>
-              <span className="tag">{openEvent.type}</span>
-              <p><CalendarDays size={15} /> {formatDate(openEvent.date).label} · {formatTime(openEvent.time)}</p>
-              <p><ShieldCheck size={15} /> {openEvent.location}</p>
-            </div>
-          </div>
-          <div className="report-section-head"><h4>Coach notes</h4><span>Players see these</span></div>
-          <p className="detail-copy report-notes">{openEvent.notes || "No notes for players yet. Use Edit to add some."}</p>
-          {openEvent.report && (
-            <p className="detail-copy">
-              <span className={`result-pill result-${resultOf(openEvent.report)}`}>{resultOf(openEvent.report)}</span>{" "}
-              Final {openEvent.report.teamScore}–{openEvent.report.opponentScore}
-            </p>
-          )}
-          {openEvent.type === "Game" && isUpcoming(openEvent) && (
-            <LineupPicker players={players} lineup={openEvent.lineup ?? []} onChange={(ids) => setLineup(openEvent.id, ids)} />
-          )}
-          <div className="modal-actions">
-            <DeleteButton onConfirm={() => { setEvents((current) => current.filter((item) => item.id !== openEvent.id)); closeDialog(); }} />
-            <button className="secondary-button" onClick={() => setDialog({ type: "event-form", draft: openEvent })}><Pencil size={15} /> Edit</button>
-            {canReport(openEvent) && (
-              openEvent.report
-                ? <button className="primary-button" onClick={() => setDialog({ type: "report", id: openEvent.id })}><BarChart3 size={15} /> View result</button>
-                : <button className="primary-button" onClick={() => setDialog({ type: "report-form", id: openEvent.id })}><BarChart3 size={15} /> Enter result</button>
-            )}
-          </div>
+          <EventDetail
+            key={openEvent.id}
+            event={openEvent}
+            players={players}
+            onEdit={() => setDialog({ type: "event-form", draft: openEvent })}
+            onDelete={() => { setEvents((current) => current.filter((item) => item.id !== openEvent.id)); closeDialog(); }}
+            onReport={() => setDialog({ type: openEvent.report ? "report" : "report-form", id: openEvent.id })}
+            onSave={(lineup, notes) => {
+              setEvents((current) => current.map((item) => item.id === openEvent.id ? { ...item, lineup, notes } : item));
+              setPage("Schedule");
+              closeDialog();
+            }}
+          />
         </Modal>
       )}
       {dialog?.type === "report-form" && reportEvent && (
@@ -3796,22 +4140,28 @@ export default function App() {
         <Modal title={openPlayer.name} onClose={closeDialog}>
           <p className="detail-copy">#{openPlayer.number} · {openPlayer.position} · {openPlayer.status}</p>
           {openPlayer.accountEmail && <p className="field-hint">Joined with their own account ({openPlayer.accountEmail}).</p>}
-          <p className="detail-copy">{openPlayer.rating ? `Last rating ${openPlayer.rating} / 10` : "No rating yet."}</p>
-          <p className="detail-copy">{openPlayer.review || "No review written yet."}</p>
+          <PlayerRatingSummary player={openPlayer} events={events} />
           <div className="modal-actions">
             {!openPlayer.accountEmail && <DeleteButton onConfirm={() => { setPlayers((current) => current.filter((item) => item.id !== openPlayer.id)); closeDialog(); }} />}
             <button className="secondary-button" onClick={() => setDialog({ type: "player-form", draft: openPlayer })}>Edit</button>
-            <button className="primary-button" onClick={() => setDialog({ type: "reviews" })}>Review</button>
+            <button className="primary-button" onClick={() => setDialog({ type: "reviews", eventId: ratingHistory(events, openPlayer)[0]?.event.id })}>Review</button>
           </div>
         </Modal>
       )}
       {dialog?.type === "reviews" && (
-        <Modal title="Game reviews" onClose={closeDialog}>
+        <Modal title="Game reviews" onClose={closeDialog} wide>
           <ReviewEditor
+            events={events}
             players={players}
+            eventId={dialog.eventId}
             onClose={closeDialog}
-            onSave={(id, rating, review) => {
-              setPlayers((current) => current.map((player) => player.id === id ? { ...player, rating, review } : player));
+            onSave={(eventId, reviews) => {
+              setEvents((current) => current.map((event) => {
+                if (event.id !== eventId || !event.report) return event;
+                const kept = (event.report.reviews ?? []).filter((item) => !reviews.some((review) => review.playerId === item.playerId));
+                return { ...event, report: { ...event.report, reviews: [...kept, ...reviews] } };
+              }));
+              closeDialog();
             }}
           />
         </Modal>

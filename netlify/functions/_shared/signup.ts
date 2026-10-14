@@ -6,38 +6,8 @@ import { cleanText, jersey, position, sameJersey } from "./validate";
 type SignupUser = {
   id?: string;
   email?: string;
-  app_metadata?: Record<string, unknown>;
   user_metadata?: Record<string, unknown>;
 };
-
-export function signupUser(body: string | null) {
-  const parsed = JSON.parse(body || "{}") as { user?: SignupUser };
-  return parsed.user ?? (parsed as SignupUser);
-}
-
-export function signupProblem(user: SignupUser) {
-  const data = user.user_metadata ?? {};
-  const role = data.role === "player" ? "player" : data.role === "coach" ? "coach" : "";
-  const name = cleanText(data.full_name, 80);
-  if (!name) return "Enter your name.";
-  if (role === "coach") {
-    const teamName = cleanText(data.team_name, 80);
-    const season = cleanText(data.season, 4);
-    if (!teamName) return "Enter your name and your team name.";
-    if (!/^\d{4}$/.test(season)) return "Enter the season as a four-digit year.";
-    return null;
-  }
-  if (role === "player") {
-    const code = cleanText(data.team_code, 16).toUpperCase();
-    const number = jersey(data.number);
-    const spot = position(data.position);
-    if (!number) return "Enter your name and jersey number.";
-    if (!spot) return "Choose a position.";
-    if (!code) return "Enter the team code from your coach.";
-    return null;
-  }
-  return "Choose a coach or player account.";
-}
 
 function makeTeamCode(teamName: string, taken: Set<string>) {
   const stem = (teamName.replace(/[^a-z]/gi, "").toUpperCase().slice(0, 4) || "TEAM").padEnd(4, "X");
@@ -49,18 +19,21 @@ function makeTeamCode(teamName: string, taken: Set<string>) {
 }
 
 export async function createMembership(user: SignupUser) {
-  const problem = signupProblem(user);
-  if (problem) return problem;
   if (!user.id || !user.email) return "The account could not be created.";
   const data = user.user_metadata ?? {};
   const name = cleanText(data.full_name, 80);
+  if (!name) return "Enter your name.";
   if (data.role === "coach") {
+    const teamName = cleanText(data.team_name, 80);
+    const season = cleanText(data.season, 4);
+    if (!teamName) return "Enter your name and your team name.";
+    if (!/^\d{4}$/.test(season)) return "Enter the season as a four-digit year.";
     const existing = await db.select({ code: teams.code }).from(teams);
-    const code = makeTeamCode(cleanText(data.team_name, 80), new Set(existing.map((team) => team.code)));
+    const code = makeTeamCode(teamName, new Set(existing.map((team) => team.code)));
     await db.insert(teams).values({
       id: crypto.randomUUID(),
-      name: cleanText(data.team_name, 80),
-      season: cleanText(data.season, 4),
+      name: teamName,
+      season,
       code,
       accent: "#d9ff57",
       dark: "#101611",
@@ -92,4 +65,22 @@ export async function createMembership(user: SignupUser) {
     review: "",
   });
   return { roles: ["player"] };
+}
+
+export async function ensureMembership(user: { id: string; email?: string; name?: string; roles?: string[]; userMetadata?: Record<string, unknown> }) {
+  const role = user.roles?.includes("player") ? "player" : user.roles?.includes("coach") ? "coach" : "";
+  if (!role || !user.email) return "This account is not linked to a team yet.";
+  const { teamForUser } = await import("./records");
+  const existing = await teamForUser(user.id, role);
+  if (existing) return existing;
+  const metadata = { ...(user.userMetadata ?? {}), role, full_name: user.userMetadata?.full_name ?? user.name ?? "" };
+  try {
+    const result = await createMembership({ id: user.id, email: user.email, user_metadata: metadata });
+    if (typeof result === "string") return result;
+  } catch (error) {
+    const again = await teamForUser(user.id, role);
+    if (again) return again;
+    throw error;
+  }
+  return await teamForUser(user.id, role) ?? "Your team could not be created.";
 }
